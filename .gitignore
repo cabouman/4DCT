@@ -1,0 +1,60 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Packaging/build
+*.egg-info/
+dist/
+build/
+
+# OS files
+.DS_Store
+*.DS_Store
+
+# IDE
+.idea/
+.vscode/
+
+# Logs
+*.log
+
+# Large outputs and local data
+data/
+outputs/
+artifacts/
+
+# Array / model / archive data
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.xrm
+*.txrm
+*.tar
+*.tgz
+*.gz
+*.zip
+
+# Media / generated figures
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.mp4
+
+# Office / generated reports
+*.pdf
+*.pptx
+*.ppt
+*.docx
+*.xlsx
