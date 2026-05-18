@@ -1,27 +1,29 @@
-import os
-import mbirjax as mj
-import mbirjax.preprocess as mjp
-import numpy as np
-import time
+"""Simple 4D MACE demo using MBIRJAX cone-beam prox_map and qGGMRF prior denoisers."""
 
-from utils_multi_threads import mace4d_from_cone_beam_params
+from __future__ import annotations
+
+import time
+import numpy as np
+import mbirjax as mj
+import os
+import mbirjax.preprocess as mjp
+
+from utils_serial import mace4d_from_cone_beam_params
 
 if __name__ == "__main__":
 
     output_path = "./output"
     os.makedirs(output_path, exist_ok=True)
 
-    # Set to True if you want to use the saved initial recons
+    # Set to True if you want to use the saved init recons
     USE_SAVED_INIT_IMAGE = False
 
     if USE_SAVED_INIT_IMAGE:
         # Specify init recon path
         init_image_path = ""
         init_image = np.load(init_image_path)
-    else:
-        init_image = None
 
-    # 4D phantom dataset
+
     dataset_url = "/depot/bouman/data/Lilly/4DCT/Phantom_30s_Run1_Dec2024.tgz"
     download_dir = "./data"
     os.makedirs(download_dir, exist_ok=True)
@@ -44,7 +46,7 @@ if __name__ == "__main__":
     )
 
     print("\n************** Split into time bins **************")
-    # Adjust if you want to use a different time range
+    # Select a range of the time stamps for faster execution
     start = 0
     end = -1
     time_range = slice(start, end)
@@ -69,10 +71,14 @@ if __name__ == "__main__":
         cone_beam_params_list.append(cone_t)
         optional_params_list.append(opt_t)
 
-    # MACE and recon parameters
+    else:
+        init_image = None
+
     weight_type = "transmission_root"
+    # Set this weight to balance the weights of forward and priors
     prior_weight = 0.5
-    max_mace_itr = 10
+    max_admm_itr = 10
+    # Parameter rho in the Mann iterations
     rho = 0.5
     forward_num_iterations = 3
     stop_threshold = 0.02
@@ -80,10 +86,9 @@ if __name__ == "__main__":
     sharpness = 1.0
     verbose = 1
     init_save_dir = os.path.join(output_path, "init")
-    timing_log_path = os.path.join(output_path, "timing_log.csv")
 
     time0 = time.time()
-
+    # Call MACE 4D
     recon_4d = mace4d_from_cone_beam_params(
         sino_list,
         cone_beam_params_list,
@@ -91,7 +96,7 @@ if __name__ == "__main__":
         init_image=init_image,
         weight_type=weight_type,
         prior_weight=prior_weight,
-        max_mace_itr=max_mace_itr,
+        max_admm_itr=max_admm_itr,
         rho=rho,
         forward_num_iterations=forward_num_iterations,
         stop_threshold=stop_threshold,
@@ -99,11 +104,8 @@ if __name__ == "__main__":
         sharpness=sharpness,
         verbose=verbose,
         init_save_dir=init_save_dir,
-        timing_log_path=timing_log_path,
     )
-
     time1 = time.time()
-    run_time = (time1 - time0) / 60 / 60
+    run_time = (time1-time0)/60/60
 
-    np.save(os.path.join(output_path, f"recon_4d_{run_time:.2f}h.npy"), recon_4d)
-    print(f"\n[MACE] Total wall time: {run_time:.2f} hours. Saved to {output_path}")
+    np.save(os.path.join(output_path, f"recon_4d_{run_time:2f}.npy"), recon_4d)
