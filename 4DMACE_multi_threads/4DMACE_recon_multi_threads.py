@@ -4,7 +4,7 @@ import mbirjax.preprocess as mjp
 import numpy as np
 import time
 
-from utils_multi_threads import mace4d_from_cone_beam_params
+from utils_multi_threads import mace4d_from_cone_beam_params, truncate_sino_into_time_bins
 
 if __name__ == "__main__":
 
@@ -49,7 +49,7 @@ if __name__ == "__main__":
     end = -1
     time_range = slice(start, end)
 
-    bins = mjp.truncate_sino_into_time_bins(
+    bins = truncate_sino_into_time_bins(
         sino=sino,
         cone_beam_params=cone_beam_params,
         optional_params=optional_params,
