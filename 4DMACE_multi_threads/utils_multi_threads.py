@@ -155,6 +155,87 @@ def dejitter_4d_dct_save_params(
 
     return recon_dejittered, jitter_params
 
+def rejitter_4d_dct_from_params(
+    recon_dejittered,
+    jitter_params,
+    dtype=np.float32,
+    return_jitter_component=False,
+):
+    """
+    Restore the original jittered reconstruction using saved DCT coefficients
+    and DCT mode indices.
+
+    Parameters
+    ----------
+    recon_dejittered : np.ndarray
+        Dejittered reconstruction returned by dejitter_4d_dct_save_params.
+
+    jitter_params : dict
+        Dictionary returned by dejitter_4d_dct_save_params.
+        Must contain:
+            - mode_indices
+            - coeffs
+            - original_shape
+
+    dtype : np.dtype
+        Working/output dtype.
+
+    return_jitter_component : bool
+        If True, also return the reconstructed jitter component.
+
+    Returns
+    -------
+    recon_rejittered : np.ndarray
+        Reconstructed jittered version.
+
+    jitter_component : np.ndarray, optional
+        Reconstructed jitter component, only returned if
+        return_jitter_component=True.
+    """
+
+    recon_dejittered = np.asarray(recon_dejittered, dtype=dtype)
+
+    mode_indices = np.asarray(jitter_params["mode_indices"], dtype=np.int32)
+    coeffs = np.asarray(jitter_params["coeffs"], dtype=dtype)
+    original_shape = tuple(jitter_params["original_shape"])
+
+    if recon_dejittered.shape != original_shape:
+        raise ValueError(
+            f"Shape mismatch: recon_dejittered has shape {recon_dejittered.shape}, "
+            f"but original_shape is {original_shape}."
+        )
+
+    N = original_shape[0]
+    spatial_shape = original_shape[1:]
+
+    expected_coeff_shape = (len(mode_indices),) + spatial_shape
+    if coeffs.shape != expected_coeff_shape:
+        raise ValueError(
+            f"Coeff shape mismatch: coeffs has shape {coeffs.shape}, "
+            f"but expected {expected_coeff_shape}."
+        )
+
+    # Create DCT coefficient array containing only the removed jitter modes.
+    C_jitter = np.zeros((N,) + spatial_shape, dtype=dtype)
+    C_jitter[mode_indices, ...] = coeffs
+
+    # Transform removed frequency components back to image/time domain.
+    jitter_component = idct(
+        C_jitter,
+        type=jitter_params.get("dct_type", 1),
+        norm=jitter_params.get("norm", "ortho"),
+        axis=0,
+    ).astype(dtype, copy=False)
+
+    # Add the jitter component back.
+    recon_rejittered = recon_dejittered + jitter_component
+    recon_rejittered = recon_rejittered.astype(dtype, copy=False)
+
+    if return_jitter_component:
+        return recon_rejittered, jitter_component
+
+    return recon_rejittered
+
 
 def truncate_sino_into_time_bins(sino, cone_beam_params, optional_params, views_per_bin, stride):
     """
