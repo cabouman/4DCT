@@ -55,46 +55,14 @@ def dejitter_4d_dct(
     """
     Remove periodic temporal jitter from a 4D reconstruction using DCT-I filtering.
 
-    Parameters
-    ----------
-    recon_4d : np.ndarray
-        4D reconstruction array. By default, shape is assumed to be
-        (time, x, y, z).
-
-    period : float or int
-        Main jitter period in frames. For example, period=6.
-
-    harmonics : bool or list/tuple of int
-        If False:
-            Remove only the main period.
-        If True:
-            Remove main period and harmonics h=2,3,... while period/h >= 2.
-            For period=6, this removes periods [6, 3, 2].
-        If list/tuple:
-            Use the specified harmonic indices.
-            For example, harmonics=[1,2,3] removes period, period/2, period/3.
-
-    band_width : int
-        Number of DCT modes to remove on each side of the center mode.
-        band_width=1 removes k_center-1, k_center, k_center+1.
-
-
-    dtype : np.dtype
-        Working dtype. Use np.float32 to reduce memory.
-
-    chunk_size : int or None
-        If None, process full volume at once.
-        If int, process spatial chunks along the last spatial axis to reduce memory.
-
-
-    verbose : bool
-        Print removed modes.
-
     Returns
     -------
     recon_dejittered : np.ndarray
         DCT-filtered 4D reconstruction.
-        If trim_to_period=True, output time length may be shorter than input.
+
+    jitter_component : np.ndarray
+        Removed jitter component. The original jittered version can be restored by:
+            recon_rejittered = recon_dejittered + jitter_component
     """
 
     recon_4d = np.asarray(recon_4d)
@@ -161,9 +129,14 @@ def dejitter_4d_dct(
         X_filtered = idct(C, type=1, norm="ortho", axis=0)
         recon_dejittered = X_filtered.reshape((N,) + spatial_shape).astype(dtype, copy=False)
 
+        jitter_component = (
+            np.asarray(recon_4d, dtype=dtype) - recon_dejittered
+        ).astype(dtype, copy=False)
+
     # Memory-saving chunked version.
     else:
         recon_dejittered = np.empty((N,) + spatial_shape, dtype=dtype)
+        jitter_component = np.empty((N,) + spatial_shape, dtype=dtype)
 
         # Chunk along the last spatial axis.
         Z = spatial_shape[-1]
@@ -192,11 +165,14 @@ def dejitter_4d_dct(
                     )
 
             block_filtered = idct(C, type=1, norm="ortho", axis=0)
-            recon_dejittered[..., z0:z1] = block_filtered.astype(dtype, copy=False)
+            block_filtered = block_filtered.astype(dtype, copy=False)
+
+            recon_dejittered[..., z0:z1] = block_filtered
+            jitter_component[..., z0:z1] = block - block_filtered
 
             del block, C, block_filtered
 
-    return recon_dejittered
+    return recon_dejittered, jitter_component
 
 
 def truncate_sino_into_time_bins(sino, cone_beam_params, optional_params, views_per_bin, stride):
