@@ -43,26 +43,27 @@ from scipy.fft import dct, idct
 
 _THREAD_LOCAL = threading.local()
 
-def dejitter_4d_dct(
+def dejitter_4d_dct_save_params(
     recon_4d,
     period,
     harmonics=True,
     band_width=1,
     dtype=np.float32,
-    chunk_size=None,
     verbose=True,
 ):
     """
-    Remove periodic temporal jitter from a 4D reconstruction using DCT-I filtering.
+    Remove periodic temporal jitter using DCT-I filtering.
 
     Returns
     -------
     recon_dejittered : np.ndarray
-        DCT-filtered 4D reconstruction.
+        Dejittered reconstruction.
 
-    jitter_component : np.ndarray
-        Removed jitter component. The original jittered version can be restored by:
-            recon_rejittered = recon_dejittered + jitter_component
+    jitter_params : dict
+        Removed frequency-domain parameters for rejittering:
+            - mode_indices: removed DCT bin indices
+            - coeffs: removed DCT coefficients
+            - original_shape: original input shape
     """
 
     recon_4d = np.asarray(recon_4d)
@@ -79,100 +80,80 @@ def dejitter_4d_dct(
         """
         return 2 * (N - 1) / p
 
-    def zero_dct_band_inplace(C, k_center, band_width):
-        k0 = int(round(k_center))
-        lo = max(0, k0 - band_width)
-        hi = min(C.shape[0], k0 + band_width + 1)
-
-        if lo < hi:
-            C[lo:hi, ...] = 0
-
-        return lo, hi, k0
-
-    # Decide which harmonics to remove.
+    # Decide harmonics.
     if harmonics is False:
         harmonic_list = [1]
     elif harmonics is True:
-        # Include h while period/h >= 2.
-        # For period=6, gives h=[1,2,3] -> periods [6,3,2].
         max_h = int(np.floor(period / 2))
         harmonic_list = list(range(1, max_h + 1))
     else:
         harmonic_list = list(harmonics)
 
-    # Convert harmonic index h to actual period period/h.
     periods_to_remove = [period / h for h in harmonic_list]
+
+    mode_indices = []
 
     if verbose:
         print("Input shape:", recon_4d.shape)
         print("Periods to remove:", periods_to_remove)
 
-    # Full-volume version.
-    if chunk_size is None:
-        X = np.asarray(recon_4d, dtype=dtype).reshape(N, -1)
+    for p in periods_to_remove:
+        k_center = period_to_dct1_k(p, N)
+        k0 = int(round(k_center))
 
-        C = dct(X, type=1, norm="ortho", axis=0)
+        lo = max(0, k0 - band_width)
+        hi = min(N, k0 + band_width + 1)
 
-        for p in periods_to_remove:
-            k_center = period_to_dct1_k(p, N)
-            lo, hi, k0 = zero_dct_band_inplace(C, k_center, band_width)
+        mode_indices.extend(range(lo, hi))
 
-            if verbose:
-                actual_period = 2 * (N - 1) / k0 if k0 != 0 else np.inf
-                print(
-                    f"Removed period {p:.3g}: "
-                    f"k≈{k_center:.2f}, rounded k={k0}, "
-                    f"actual period≈{actual_period:.3g}, "
-                    f"zeroed k={lo}:{hi-1}"
-                )
+        if verbose:
+            actual_period = 2 * (N - 1) / k0 if k0 != 0 else np.inf
+            print(
+                f"Removed period {p:.3g}: "
+                f"k≈{k_center:.2f}, rounded k={k0}, "
+                f"actual period≈{actual_period:.3g}, "
+                f"saved/zeroed k={lo}:{hi-1}"
+            )
 
-        X_filtered = idct(C, type=1, norm="ortho", axis=0)
-        recon_dejittered = X_filtered.reshape((N,) + spatial_shape).astype(dtype, copy=False)
+    # Remove duplicate bins, because bands from different harmonics may overlap.
+    mode_indices = np.array(sorted(set(mode_indices)), dtype=np.int32)
 
-        jitter_component = (
-            np.asarray(recon_4d, dtype=dtype) - recon_dejittered
-        ).astype(dtype, copy=False)
+    if verbose:
+        print("Saved DCT mode indices:", mode_indices)
+        print("Number of saved modes:", len(mode_indices))
 
-    # Memory-saving chunked version.
-    else:
-        recon_dejittered = np.empty((N,) + spatial_shape, dtype=dtype)
-        jitter_component = np.empty((N,) + spatial_shape, dtype=dtype)
+    # DCT along temporal axis.
+    X = np.asarray(recon_4d, dtype=dtype).reshape(N, -1)
+    C = dct(X, type=1, norm="ortho", axis=0)
 
-        # Chunk along the last spatial axis.
-        Z = spatial_shape[-1]
+    # Save removed coefficients before zeroing.
+    removed_coeffs = C[mode_indices, :].copy()
 
-        for z0 in range(0, Z, chunk_size):
-            z1 = min(z0 + chunk_size, Z)
+    # Remove selected temporal frequency bins.
+    C[mode_indices, :] = 0
 
-            if verbose:
-                print(f"Processing chunk z={z0}:{z1}")
+    # Inverse DCT to get dejittered recon.
+    X_filtered = idct(C, type=1, norm="ortho", axis=0)
+    recon_dejittered = X_filtered.reshape((N,) + spatial_shape).astype(
+        dtype, copy=False
+    )
 
-            block = np.asarray(recon_4d[..., z0:z1], dtype=dtype)
+    removed_coeffs = removed_coeffs.reshape(
+        (len(mode_indices),) + spatial_shape
+    ).astype(dtype, copy=False)
 
-            C = dct(block, type=1, norm="ortho", axis=0)
+    jitter_params = {
+        "mode_indices": mode_indices,
+        "coeffs": removed_coeffs,
+        "original_shape": np.array(recon_4d.shape, dtype=np.int64),
+        "period": period,
+        "harmonics": harmonics,
+        "band_width": band_width,
+        "dct_type": 1,
+        "norm": "ortho",
+    }
 
-            for p in periods_to_remove:
-                k_center = period_to_dct1_k(p, N)
-                lo, hi, k0 = zero_dct_band_inplace(C, k_center, band_width)
-
-                if verbose and z0 == 0:
-                    actual_period = 2 * (N - 1) / k0 if k0 != 0 else np.inf
-                    print(
-                        f"Removed period {p:.3g}: "
-                        f"k≈{k_center:.2f}, rounded k={k0}, "
-                        f"actual period≈{actual_period:.3g}, "
-                        f"zeroed k={lo}:{hi-1}"
-                    )
-
-            block_filtered = idct(C, type=1, norm="ortho", axis=0)
-            block_filtered = block_filtered.astype(dtype, copy=False)
-
-            recon_dejittered[..., z0:z1] = block_filtered
-            jitter_component[..., z0:z1] = block - block_filtered
-
-            del block, C, block_filtered
-
-    return recon_dejittered, jitter_component
+    return recon_dejittered, jitter_params
 
 
 def truncate_sino_into_time_bins(sino, cone_beam_params, optional_params, views_per_bin, stride):
