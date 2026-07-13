@@ -36,11 +36,168 @@ import jax.numpy as jnp
 import mbirjax as mj
 import numpy as np
 
+from scipy.fft import dct, idct
+
 # ---------------------------------------------------------------------------
 # Thread-local denoiser cache
 # ---------------------------------------------------------------------------
 
 _THREAD_LOCAL = threading.local()
+
+def dejitter_4d_dct(
+    recon_4d,
+    period,
+    harmonics=True,
+    band_width=1,
+    dtype=np.float32,
+    chunk_size=None,
+    verbose=True,
+):
+    """
+    Remove periodic temporal jitter from a 4D reconstruction using DCT-I filtering.
+
+    Parameters
+    ----------
+    recon_4d : np.ndarray
+        4D reconstruction array. By default, shape is assumed to be
+        (time, x, y, z).
+
+    period : float or int
+        Main jitter period in frames. For example, period=6.
+
+    harmonics : bool or list/tuple of int
+        If False:
+            Remove only the main period.
+        If True:
+            Remove main period and harmonics h=2,3,... while period/h >= 2.
+            For period=6, this removes periods [6, 3, 2].
+        If list/tuple:
+            Use the specified harmonic indices.
+            For example, harmonics=[1,2,3] removes period, period/2, period/3.
+
+    band_width : int
+        Number of DCT modes to remove on each side of the center mode.
+        band_width=1 removes k_center-1, k_center, k_center+1.
+
+
+    dtype : np.dtype
+        Working dtype. Use np.float32 to reduce memory.
+
+    chunk_size : int or None
+        If None, process full volume at once.
+        If int, process spatial chunks along the last spatial axis to reduce memory.
+
+
+    verbose : bool
+        Print removed modes.
+
+    Returns
+    -------
+    recon_dejittered : np.ndarray
+        DCT-filtered 4D reconstruction.
+        If trim_to_period=True, output time length may be shorter than input.
+    """
+
+    recon_4d = np.asarray(recon_4d)
+
+    N = recon_4d.shape[0]
+    spatial_shape = recon_4d.shape[1:]
+
+    def period_to_dct1_k(p, N):
+        """
+        For DCT-I:
+            f_k = k / [2 * (N - 1)]
+            f = 1 / p
+            k = 2 * (N - 1) / p
+        """
+        return 2 * (N - 1) / p
+
+    def zero_dct_band_inplace(C, k_center, band_width):
+        k0 = int(round(k_center))
+        lo = max(0, k0 - band_width)
+        hi = min(C.shape[0], k0 + band_width + 1)
+
+        if lo < hi:
+            C[lo:hi, ...] = 0
+
+        return lo, hi, k0
+
+    # Decide which harmonics to remove.
+    if harmonics is False:
+        harmonic_list = [1]
+    elif harmonics is True:
+        # Include h while period/h >= 2.
+        # For period=6, gives h=[1,2,3] -> periods [6,3,2].
+        max_h = int(np.floor(period / 2))
+        harmonic_list = list(range(1, max_h + 1))
+    else:
+        harmonic_list = list(harmonics)
+
+    # Convert harmonic index h to actual period period/h.
+    periods_to_remove = [period / h for h in harmonic_list]
+
+    if verbose:
+        print("Input shape:", recon_4d.shape)
+        print("Periods to remove:", periods_to_remove)
+
+    # Full-volume version.
+    if chunk_size is None:
+        X = np.asarray(recon_4d, dtype=dtype).reshape(N, -1)
+
+        C = dct(X, type=1, norm="ortho", axis=0)
+
+        for p in periods_to_remove:
+            k_center = period_to_dct1_k(p, N)
+            lo, hi, k0 = zero_dct_band_inplace(C, k_center, band_width)
+
+            if verbose:
+                actual_period = 2 * (N - 1) / k0 if k0 != 0 else np.inf
+                print(
+                    f"Removed period {p:.3g}: "
+                    f"k≈{k_center:.2f}, rounded k={k0}, "
+                    f"actual period≈{actual_period:.3g}, "
+                    f"zeroed k={lo}:{hi-1}"
+                )
+
+        X_filtered = idct(C, type=1, norm="ortho", axis=0)
+        recon_dejittered = X_filtered.reshape((N,) + spatial_shape).astype(dtype, copy=False)
+
+    # Memory-saving chunked version.
+    else:
+        recon_dejittered = np.empty((N,) + spatial_shape, dtype=dtype)
+
+        # Chunk along the last spatial axis.
+        Z = spatial_shape[-1]
+
+        for z0 in range(0, Z, chunk_size):
+            z1 = min(z0 + chunk_size, Z)
+
+            if verbose:
+                print(f"Processing chunk z={z0}:{z1}")
+
+            block = np.asarray(recon_4d[..., z0:z1], dtype=dtype)
+
+            C = dct(block, type=1, norm="ortho", axis=0)
+
+            for p in periods_to_remove:
+                k_center = period_to_dct1_k(p, N)
+                lo, hi, k0 = zero_dct_band_inplace(C, k_center, band_width)
+
+                if verbose and z0 == 0:
+                    actual_period = 2 * (N - 1) / k0 if k0 != 0 else np.inf
+                    print(
+                        f"Removed period {p:.3g}: "
+                        f"k≈{k_center:.2f}, rounded k={k0}, "
+                        f"actual period≈{actual_period:.3g}, "
+                        f"zeroed k={lo}:{hi-1}"
+                    )
+
+            block_filtered = idct(C, type=1, norm="ortho", axis=0)
+            recon_dejittered[..., z0:z1] = block_filtered.astype(dtype, copy=False)
+
+            del block, C, block_filtered
+
+    return recon_dejittered
 
 def truncate_sino_into_time_bins(sino, cone_beam_params, optional_params, views_per_bin, stride):
     """
@@ -298,6 +455,9 @@ def run_mace_with_models_multigpu(
             )
             for t in range(nt)
         ])
+        out = dejitter_4d_dct(out, period=6, harmonics=True, band_width=1, chunk_size=None, dtype=np.float32, verbose=True)
+
+
         agent_sec = time.time() - agent_t0
         if verbose:
             print(f"[MACE]  Agent 0 ran on {device} in {agent_sec:.2f} sec.")
@@ -307,6 +467,8 @@ def run_mace_with_models_multigpu(
         """Agent 1: qGGMRF XY-t (fixed z slabs)."""
         device = devices[device_index]
         agent_t0 = time.time()
+        W_k = dejitter_4d_dct(W_k, period=6, harmonics=True, band_width=1, chunk_size=None, dtype=np.float32, verbose=True)
+        print(f'Alignment: agent0: {time.time()-agent_t0}')
         out = denoiser_wrapper(W_k, permute_vector=(3, 0, 1, 2), sigma_list=sigma_xyt, device=device)
         agent_sec = time.time() - agent_t0
         if verbose:
@@ -317,6 +479,8 @@ def run_mace_with_models_multigpu(
         """Agent 2: qGGMRF YZ-t (fixed row slabs)."""
         device = devices[device_index]
         agent_t0 = time.time()
+        W_k = dejitter_4d_dct(W_k, period=6, harmonics=True, band_width=1, chunk_size=None, dtype=np.float32, verbose=True)
+        print(f'Alignment: agent0: {time.time()-agent_t0}')
         out = denoiser_wrapper(W_k, permute_vector=(1, 0, 2, 3), sigma_list=sigma_yzt, device=device)
         agent_sec = time.time() - agent_t0
         if verbose:
@@ -327,6 +491,8 @@ def run_mace_with_models_multigpu(
         """Agent 3: qGGMRF XZ-t (fixed col slabs)."""
         device = devices[device_index]
         agent_t0 = time.time()
+        W_k = dejitter_4d_dct(W_k, period=6, harmonics=True, band_width=1, chunk_size=None, dtype=np.float32, verbose=True)
+        print(f'Alignment: agent0: {time.time()-agent_t0}')
         out = denoiser_wrapper(W_k, permute_vector=(2, 0, 1, 3), sigma_list=sigma_xzt, device=device)
         agent_sec = time.time() - agent_t0
         if verbose:
