@@ -1,19 +1,35 @@
 """
 4D MACE reconstruction with multi(>=4)-GPU support.
-
 GPU assignment is controlled by agent_device_indices:
   - Agent 0: cone-beam prox_map (serial over time bins, original logic)
   - Agent 1: qGGMRF denoiser, XY-t hyperplanes
   - Agent 2: qGGMRF denoiser, YZ-t hyperplanes
   - Agent 3: qGGMRF denoiser, XZ-t hyperplanes
-
 All 4 agents are dispatched concurrently via ThreadPoolExecutor(4).
 Each prior-agent thread uses jax.default_device() to pin all JAX ops (including
 QGGMRFDenoiser) to its assigned GPU.
 init_image (large) lives on CPU as a NumPy array throughout.
 Per-thread denoiser caching avoids cross-thread JAX state sharing.
-"""
 
+--- SINGLE-GPU-MESH FIX -----------------------------------------------------
+mbirjax's ConeBeamModel / QGGMRFDenoiser auto-shard themselves across every
+GPU jax.devices() can see UNLESS you call model.configure_devices([...]).
+jax.default_device() does NOT override this: it only affects placement of
+new, otherwise-unplaced arrays, not mbirjax's internal NamedSharding/Mesh.
+
+Because this script never called configure_devices(), every model/denoiser
+silently built its own 4-GPU Mesh. Running 4 different computations
+concurrently (forward vs. 3 different qGGMRF orientations) then means each
+thread's model tries to open its own 4-way NCCL "clique" across all 4 GPUs at
+the same time, for calls that don't correspond to the same collective op ->
+rendezvous stalls forever (the "Acquire clique: devices=4:[0,1,2,3] ... may
+be stuck" error).
+
+Fix: explicitly pin every ConeBeamModel and every QGGMRFDenoiser instance to
+exactly the single GPU its agent owns, via configure_devices([device]).
+Search "SINGLE-GPU FIX" below for every change relative to the original.
+-----------------------------------------------------------------------------
+"""
 from __future__ import annotations
 
 import os
@@ -36,13 +52,13 @@ import jax.numpy as jnp
 import mbirjax as mj
 import numpy as np
 
-from scipy.fft import dct, idct
-
 # ---------------------------------------------------------------------------
 # Thread-local denoiser cache
 # ---------------------------------------------------------------------------
-
 _THREAD_LOCAL = threading.local()
+
+from scipy.fft import dct, idct
+
 
 def dejitter_4d_dct(
     recon_4d,
@@ -61,10 +77,8 @@ def dejitter_4d_dct(
     recon_4d : np.ndarray
         4D reconstruction array. By default, shape is assumed to be
         (time, x, y, z).
-
     period : float or int
         Main jitter period in frames. For example, period=6.
-
     harmonics : bool or list/tuple of int
         If False:
             Remove only the main period.
@@ -74,20 +88,14 @@ def dejitter_4d_dct(
         If list/tuple:
             Use the specified harmonic indices.
             For example, harmonics=[1,2,3] removes period, period/2, period/3.
-
     band_width : int
         Number of DCT modes to remove on each side of the center mode.
         band_width=1 removes k_center-1, k_center, k_center+1.
-
-
     dtype : np.dtype
         Working dtype. Use np.float32 to reduce memory.
-
     chunk_size : int or None
         If None, process full volume at once.
         If int, process spatial chunks along the last spatial axis to reduce memory.
-
-
     verbose : bool
         Print removed modes.
 
@@ -97,9 +105,7 @@ def dejitter_4d_dct(
         DCT-filtered 4D reconstruction.
         If trim_to_period=True, output time length may be shorter than input.
     """
-
     recon_4d = np.asarray(recon_4d)
-
     N = recon_4d.shape[0]
     spatial_shape = recon_4d.shape[1:]
 
@@ -116,10 +122,8 @@ def dejitter_4d_dct(
         k0 = int(round(k_center))
         lo = max(0, k0 - band_width)
         hi = min(C.shape[0], k0 + band_width + 1)
-
         if lo < hi:
             C[lo:hi, ...] = 0
-
         return lo, hi, k0
 
     # Decide which harmonics to remove.
@@ -143,13 +147,10 @@ def dejitter_4d_dct(
     # Full-volume version.
     if chunk_size is None:
         X = np.asarray(recon_4d, dtype=dtype).reshape(N, -1)
-
         C = dct(X, type=1, norm="ortho", axis=0)
-
         for p in periods_to_remove:
             k_center = period_to_dct1_k(p, N)
             lo, hi, k0 = zero_dct_band_inplace(C, k_center, band_width)
-
             if verbose:
                 actual_period = 2 * (N - 1) / k0 if k0 != 0 else np.inf
                 print(
@@ -158,31 +159,22 @@ def dejitter_4d_dct(
                     f"actual period≈{actual_period:.3g}, "
                     f"zeroed k={lo}:{hi-1}"
                 )
-
         X_filtered = idct(C, type=1, norm="ortho", axis=0)
         recon_dejittered = X_filtered.reshape((N,) + spatial_shape).astype(dtype, copy=False)
-
     # Memory-saving chunked version.
     else:
         recon_dejittered = np.empty((N,) + spatial_shape, dtype=dtype)
-
         # Chunk along the last spatial axis.
         Z = spatial_shape[-1]
-
         for z0 in range(0, Z, chunk_size):
             z1 = min(z0 + chunk_size, Z)
-
             if verbose:
                 print(f"Processing chunk z={z0}:{z1}")
-
             block = np.asarray(recon_4d[..., z0:z1], dtype=dtype)
-
             C = dct(block, type=1, norm="ortho", axis=0)
-
             for p in periods_to_remove:
                 k_center = period_to_dct1_k(p, N)
                 lo, hi, k0 = zero_dct_band_inplace(C, k_center, band_width)
-
                 if verbose and z0 == 0:
                     actual_period = 2 * (N - 1) / k0 if k0 != 0 else np.inf
                     print(
@@ -191,13 +183,11 @@ def dejitter_4d_dct(
                         f"actual period≈{actual_period:.3g}, "
                         f"zeroed k={lo}:{hi-1}"
                     )
-
             block_filtered = idct(C, type=1, norm="ortho", axis=0)
             recon_dejittered[..., z0:z1] = block_filtered.astype(dtype, copy=False)
-
             del block, C, block_filtered
-
     return recon_dejittered
+
 
 def truncate_sino_into_time_bins(sino, cone_beam_params, optional_params, views_per_bin, stride):
     """
@@ -206,17 +196,13 @@ def truncate_sino_into_time_bins(sino, cone_beam_params, optional_params, views_
     Args:
         sino (ndarray):
             Input sinogram array with shape (num_views, ...).
-
         cone_beam_params (dict):
             Cone-beam geometry parameters returned by MBIRJAX preprocessing.
             Must contain keys "angles" and "sinogram_shape".
-
         optional_params (dict):
             Optional MBIRJAX parameters associated with the dataset.
-
         views_per_bin (int):
             Number of views in each time bin.
-
         stride (int):
             Step size between consecutive bins along the view axis.
 
@@ -226,10 +212,8 @@ def truncate_sino_into_time_bins(sino, cone_beam_params, optional_params, views_
             where each `sino_t` has exactly `views_per_bin` views.
             Any trailing views that cannot form a full bin are discarded.
     """
-
     angles = cone_beam_params["angles"]
     num_views = sino.shape[0]
-
     if views_per_bin <= 0:
         raise ValueError("views_per_bin must be a positive integer.")
     if stride <= 0:
@@ -246,7 +230,6 @@ def truncate_sino_into_time_bins(sino, cone_beam_params, optional_params, views_
         # Copy and update params
         cone_t = dict(cone_beam_params)
         cone_t["angles"] = angles[sl].copy()
-
         shape = list(cone_t["sinogram_shape"])
         shape[0] = views_per_bin
         cone_t["sinogram_shape"] = tuple(shape)
@@ -254,24 +237,33 @@ def truncate_sino_into_time_bins(sino, cone_beam_params, optional_params, views_
         opt_t = dict(optional_params)
 
         bins.append((sino_t, cone_t, opt_t, sl))
-
     return bins
 
-def get_qggmrf_denoiser(shape):
-    """Return a per-thread cached QGGMRFDenoiser to avoid cross-thread state sharing."""
+
+# ---------------------------------------------------------------------------
+# SINGLE-GPU FIX: get_qggmrf_denoiser now takes `device` and PINS the denoiser
+# to that single device via configure_devices([device]). Without this call,
+# QGGMRFDenoiser auto-shards across every GPU jax.devices() can see, which is
+# what caused the 4-way NCCL clique deadlock across concurrent agent threads.
+# Cache key is now (shape, device) since a denoiser is now tied to one device.
+# ---------------------------------------------------------------------------
+def get_qggmrf_denoiser(shape, device):
+    """Return a per-thread, per-device cached QGGMRFDenoiser pinned to a single GPU."""
     cache = getattr(_THREAD_LOCAL, "denoiser_cache", None)
     if cache is None:
         cache = {}
         _THREAD_LOCAL.denoiser_cache = cache
-    if shape not in cache:
-        cache[shape] = mj.QGGMRFDenoiser(shape)
-    return cache[shape]
+    key = (shape, device)
+    if key not in cache:
+        denoiser = mj.QGGMRFDenoiser(shape)
+        denoiser.configure_devices([device])  # <-- SINGLE-GPU FIX: pin to one device
+        cache[key] = denoiser
+    return cache[key]
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
 def normalize_prior_weights(prior_weight):
     if isinstance(prior_weight, (list, tuple, np.ndarray)):
         prior = list(prior_weight)
@@ -280,12 +272,13 @@ def normalize_prior_weights(prior_weight):
     return [1.0 - w, w / 3.0, w / 3.0, w / 3.0]
 
 
-def estimate_sigma_per_hyperplane(x, sigma_noise_floor=1e-6):
+# SINGLE-GPU FIX: now takes `device` and passes it through to get_qggmrf_denoiser.
+def estimate_sigma_per_hyperplane(x, device, sigma_noise_floor=1e-6):
     """
     Estimate one sigma value per hyperplane.
     x shape: (num_hyperplanes, dim1, dim2)
     """
-    denoiser = get_qggmrf_denoiser(x.shape[1:])
+    denoiser = get_qggmrf_denoiser(x.shape[1:], device)
     sigma_list = np.empty(x.shape[0], dtype=np.float32)
     for i in range(x.shape[0]):
         sigma_use = denoiser.estimate_image_noise_std(x[i][:, ::4, ::4])
@@ -299,12 +292,12 @@ def qggmrf_hyperplane_denoise(x, sigma_list, device, sigma_noise_floor=1e-6):
     """
     Denoise a stack of hyperplanes on the given JAX device.
     x shape: (num_hyperplanes, dim1, dim2)
-    All JAX ops inside QGGMRFDenoiser run on `device` via jax.default_device().
+    All JAX ops inside QGGMRFDenoiser run on `device` because the denoiser
+    itself is pinned via configure_devices([device]) in get_qggmrf_denoiser.
     """
     y = np.empty_like(x)
     with jax.default_device(device):
-        denoiser = get_qggmrf_denoiser(x.shape[1:])
-
+        denoiser = get_qggmrf_denoiser(x.shape[1:], device)  # SINGLE-GPU FIX: pass device
         for i in range(x.shape[0]):
             sigma_use = sigma_list[i]
             if (not np.isfinite(sigma_use)) or (sigma_use <= sigma_noise_floor):
@@ -330,7 +323,6 @@ def denoiser_wrapper(x, permute_vector, sigma_list, device):
 # ---------------------------------------------------------------------------
 # Multi-GPU MACE core
 # ---------------------------------------------------------------------------
-
 def run_mace_with_models_multigpu(
     models,
     sino_list,
@@ -364,6 +356,18 @@ def run_mace_with_models_multigpu(
         )
         print(f"[MACE] Start 4D reconstruction with {nt} time bins.")
 
+    # ── SINGLE-GPU FIX ──────────────────────────────────────────────────────
+    # Pin every per-time-bin ConeBeamModel to Agent 0's single GPU. Without
+    # this, each ConeBeamModel auto-shards across all n_gpu devices the first
+    # time .recon()/.prox_map() is called, which is what produced the 4-way
+    # NCCL clique deadlock when run concurrently with the other 3 agents.
+    forward_device = devices[agent_device_indices[0]]
+    for t in range(nt):
+        models[t].configure_devices([forward_device])
+    if verbose:
+        print(f"[MACE] Pinned all {nt} ConeBeamModel instances to {forward_device} (single-GPU mesh).")
+    # ─────────────────────────────────────────────────────────────────────────
+
     # ── Initialisation — serial on Agent 0's device, identical to original ─
     init_device_index = agent_device_indices[0]
     init_device = devices[init_device_index]
@@ -396,11 +400,21 @@ def run_mace_with_models_multigpu(
             print("[MACE] Using provided init_image.")
 
     # ── Pre-compute sigma lists (CPU, one-time) ────────────────────────────
+    # SINGLE-GPU FIX: pass a device to estimate_sigma_per_hyperplane so the
+    # (now device-pinned) QGGMRFDenoiser it creates is pinned rather than
+    # implicitly auto-sharded across all GPUs. Using each prior agent's own
+    # device keeps the eventual per-thread denoiser cache warm/reused.
     if verbose:
         print("[MACE] Precomputing sigma lists...")
-    sigma_xyt = estimate_sigma_per_hyperplane(np.transpose(init_image, (3, 0, 1, 2)))
-    sigma_yzt = estimate_sigma_per_hyperplane(np.transpose(init_image, (1, 0, 2, 3)))
-    sigma_xzt = estimate_sigma_per_hyperplane(np.transpose(init_image, (2, 0, 1, 3)))
+    sigma_xyt = estimate_sigma_per_hyperplane(
+        np.transpose(init_image, (3, 0, 1, 2)), device=devices[agent_device_indices[1]]
+    )
+    sigma_yzt = estimate_sigma_per_hyperplane(
+        np.transpose(init_image, (1, 0, 2, 3)), device=devices[agent_device_indices[2]]
+    )
+    sigma_xzt = estimate_sigma_per_hyperplane(
+        np.transpose(init_image, (2, 0, 1, 3)), device=devices[agent_device_indices[3]]
+    )
     if verbose:
         print(
             "[MACE] Nonzero sigma counts: "
@@ -413,8 +427,8 @@ def run_mace_with_models_multigpu(
     # ── MACE state (all on CPU / NumPy) ───────────────────────────────────
     W = [np.copy(init_image) for _ in range(4)]
     X = [np.copy(init_image) for _ in range(4)]  # warm-start for X[0]
-    timing_log = []
 
+    timing_log = []
     if timing_log_path is not None:
         timing_log_dir = os.path.dirname(timing_log_path)
         if timing_log_dir:
@@ -434,7 +448,6 @@ def run_mace_with_models_multigpu(
             writer.writeheader()
 
     # ── Agent definitions ──────────────────────────────────────────────────
-
     def run_forward_agent(W_k, X_prev, device_index):
         """
         Agent 0: cone-beam prox_map, serial over time bins, pinned to device_index.
@@ -456,8 +469,6 @@ def run_mace_with_models_multigpu(
             for t in range(nt)
         ])
         out = dejitter_4d_dct(out, period=6, harmonics=True, band_width=1, chunk_size=None, dtype=np.float32, verbose=True)
-
-
         agent_sec = time.time() - agent_t0
         if verbose:
             print(f"[MACE]  Agent 0 ran on {device} in {agent_sec:.2f} sec.")
@@ -588,19 +599,19 @@ def mace4d_from_cone_beam_params(
 ):
     if verbose:
         print("[MACE] Building weights and per-bin cone-beam models...")
-
     weights_list = [
         mj.gen_weights(jnp.asarray(s), weight_type=weight_type)
         for s in sino_list
     ]
-
     models = []
     for cone_t, opt_t in zip(cone_beam_params_list, optional_params_list):
         ct_model = mj.ConeBeamModel(**cone_t)
         ct_model.set_params(**opt_t)
         ct_model.set_params(positivity_flag=True, sharpness=sharpness, verbose=verbose)
         models.append(ct_model)
-
+        # NOTE: configure_devices([single_gpu]) is applied later, inside
+        # run_mace_with_models_multigpu, once the GPU list has been
+        # discovered via jax.devices("gpu"). See "SINGLE-GPU FIX" there.
     if verbose:
         print(f"[MACE] Built {len(models)} cone-beam models.")
 
