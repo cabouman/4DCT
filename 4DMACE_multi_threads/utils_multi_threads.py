@@ -579,19 +579,18 @@ def mace4d_from_cone_beam_params(
     stop_threshold=0.02,
     init_image=None,
     sigma_p=None,
-    sharpness=1.0,
     verbose=1,
     init_save_dir=None,
     timing_log_path=None,
 ):
     if verbose:
-        print("[MACE] Building weights and per-bin cone-beam models...")
+        print("[MACE] Building weights for each time bin...")
     weights_list = [
         mj.gen_weights(jnp.asarray(s), weight_type=weight_type)
         for s in sino_list
     ]
     if verbose:
-        print(f"[MACE] Built {len(model_list)} cone-beam models.")
+        print(f"[MACE] Built weights for {len(weights_list)} time bins.")
 
     recon_4d = run_mace_with_models_multigpu(
         models=model_list,

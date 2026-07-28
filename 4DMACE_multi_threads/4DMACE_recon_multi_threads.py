@@ -37,10 +37,15 @@ if __name__ == "__main__":
     views_per_bin = 48
     stride = 24
 
+    # Recon parameters that must be set on ct_model before truncating into per-bin models.
+    sharpness = 1.0
+    verbose = 1
+
     print("\n************** NSI dataset preprocessing **************")
     sino, ct_model = \
         mjp.nsi.get_sino_and_model(dataset_dir, downsample_factor=downsample_rate,
                                    subsample_view_factor=subsample_view_factor, auto_crop=sino_auto_cropping)
+    ct_model.set_params(sharpness=sharpness, verbose=verbose, positivity_flag=True)
 
 
     print("\n************** Split into time bins **************")
@@ -74,8 +79,6 @@ if __name__ == "__main__":
     forward_num_iterations = 3
     stop_threshold = 0.02
     sigma_p = None
-    sharpness = 1.0
-    verbose = 1
     init_save_dir = os.path.join(output_path, "init")
     timing_log_path = os.path.join(output_path, "timing_log.csv")
 
@@ -92,7 +95,6 @@ if __name__ == "__main__":
         forward_num_iterations=forward_num_iterations,
         stop_threshold=stop_threshold,
         sigma_p=sigma_p,
-        sharpness=sharpness,
         verbose=verbose,
         init_save_dir=init_save_dir,
         timing_log_path=timing_log_path,
