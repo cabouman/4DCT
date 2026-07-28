@@ -22,7 +22,8 @@ if __name__ == "__main__":
         # Specify init recon path
         init_image_path = ""
         init_image = np.load(init_image_path)
-
+    else:
+        init_image = None
 
     dataset_url = "/depot/bouman/data/Lilly/4DCT/Phantom_30s_Run1_Dec2024.tgz"
     download_dir = "./data"
@@ -33,17 +34,23 @@ if __name__ == "__main__":
     # Preprocessing parameters
     downsample_rate = [1, 1]
     subsample_view_factor = 1
+    sino_auto_cropping = True
 
     # 4D split parameters
     views_per_bin = 48
     stride = 24
 
+    # Recon parameters that must be set on ct_model before truncating into per-bin models,
+    # since copy_ct_model() (used by truncate_sino_into_time_bins) carries these over from
+    # ct_model rather than applying them later.
+    sharpness = 1.0
+    verbose = 1
+
     print("\n************** NSI dataset preprocessing **************")
-    sino, cone_beam_params, optional_params = mjp.nsi.compute_sino_and_params(
-        dataset_dir,
-        downsample_factor=downsample_rate,
-        subsample_view_factor=subsample_view_factor,
-    )
+    sino, ct_model = \
+        mjp.nsi.get_sino_and_model(dataset_dir, downsample_factor=downsample_rate,
+                                   subsample_view_factor=subsample_view_factor, auto_crop=sino_auto_cropping)
+    ct_model.set_params(sharpness=sharpness, verbose=verbose, positivity_flag=True)
 
     print("\n************** Split into time bins **************")
     # Select a range of the time stamps for faster execution
@@ -53,8 +60,7 @@ if __name__ == "__main__":
 
     bins = truncate_sino_into_time_bins(
         sino=sino,
-        cone_beam_params=cone_beam_params,
-        optional_params=optional_params,
+        model=ct_model,
         views_per_bin=views_per_bin,
         stride=stride,
     )[time_range]
@@ -62,17 +68,12 @@ if __name__ == "__main__":
     print(f"Total bins: {len(bins)}")
 
     sino_list = []
-    cone_beam_params_list = []
-    optional_params_list = []
+    model_list = []
 
     print("\n***************** Reconstruct each bin ****************")
-    for t, (sino_t, cone_t, opt_t, sl) in enumerate(bins):
+    for t, (sino_t, model, sl) in enumerate(bins):
         sino_list.append(sino_t)
-        cone_beam_params_list.append(cone_t)
-        optional_params_list.append(opt_t)
-
-    else:
-        init_image = None
+        model_list.append(model)
 
     weight_type = "transmission_root"
     # Set this weight to balance the weights of forward and priors
@@ -83,16 +84,13 @@ if __name__ == "__main__":
     forward_num_iterations = 3
     stop_threshold = 0.02
     sigma_p = None
-    sharpness = 1.0
-    verbose = 1
     init_save_dir = os.path.join(output_path, "init")
 
     time0 = time.time()
     # Call MACE 4D
     recon_4d = mace4d_from_cone_beam_params(
         sino_list,
-        cone_beam_params_list,
-        optional_params_list,
+        model_list,
         init_image=init_image,
         weight_type=weight_type,
         prior_weight=prior_weight,
@@ -101,7 +99,6 @@ if __name__ == "__main__":
         forward_num_iterations=forward_num_iterations,
         stop_threshold=stop_threshold,
         sigma_p=sigma_p,
-        sharpness=sharpness,
         verbose=verbose,
         init_save_dir=init_save_dir,
     )
