@@ -31,17 +31,17 @@ if __name__ == "__main__":
     # Preprocessing parameters
     downsample_rate = [1, 1]
     subsample_view_factor = 1
+    sino_auto_cropping = True
 
     # 4D split parameters
     views_per_bin = 48
     stride = 24
 
     print("\n************** NSI dataset preprocessing **************")
-    sino, cone_beam_params, optional_params = mjp.nsi.compute_sino_and_params(
-        dataset_dir,
-        downsample_factor=downsample_rate,
-        subsample_view_factor=subsample_view_factor,
-    )
+    sino, ct_model = \
+        mjp.nsi.get_sino_and_model(dataset_dir, downsample_factor=downsample_rate,
+                                   subsample_view_factor=subsample_view_factor, auto_crop=sino_auto_cropping)
+
 
     print("\n************** Split into time bins **************")
     # Adjust if you want to use a different time range
@@ -51,8 +51,7 @@ if __name__ == "__main__":
 
     bins = truncate_sino_into_time_bins(
         sino=sino,
-        cone_beam_params=cone_beam_params,
-        optional_params=optional_params,
+        model=ct_model,
         views_per_bin=views_per_bin,
         stride=stride,
     )[time_range]
@@ -60,14 +59,12 @@ if __name__ == "__main__":
     print(f"Total bins: {len(bins)}")
 
     sino_list = []
-    cone_beam_params_list = []
-    optional_params_list = []
+    model_list = []
 
     print("\n***************** Reconstruct each bin ****************")
-    for t, (sino_t, cone_t, opt_t, sl) in enumerate(bins):
+    for t, (sino_t, model, sl) in enumerate(bins):
         sino_list.append(sino_t)
-        cone_beam_params_list.append(cone_t)
-        optional_params_list.append(opt_t)
+        model_list.append(model)
 
     # MACE and recon parameters
     weight_type = "transmission_root"
@@ -86,8 +83,7 @@ if __name__ == "__main__":
 
     recon_4d = mace4d_from_cone_beam_params(
         sino_list,
-        cone_beam_params_list,
-        optional_params_list,
+        model_list,
         init_image=init_image,
         weight_type=weight_type,
         prior_weight=prior_weight,
