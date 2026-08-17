@@ -30,17 +30,16 @@ from utils import truncate_sino_into_time_bins, compute_bin_params
 if __name__ == "__main__":
 
     # ── Paths ──────────────────────────────────────────────────────────────────
-    output_path = "./output"
+    output_path = "/home/li5273/Desktop/data/output/2026/0820/dev"
     os.makedirs(output_path, exist_ok=True)
-    download_dir = "./data"
+    download_dir = "/home/li5273/PycharmProjects/lilly_exp/nsi/demo_data/"
     os.makedirs(download_dir, exist_ok=True)
 
     # ── Init image ─────────────────────────────────────────────────────────────
     # Set to True to reuse a previously saved init (fast for repeated runs).
-    # The expected path is output_path/init/init_image.npy.
-    USE_SAVED_INIT_IMAGE = False
+    USE_SAVED_INIT_IMAGE = True
     if USE_SAVED_INIT_IMAGE:
-        init_image_path = os.path.join(output_path, "init", "init_image.npy")
+        init_image_path = "/home/li5273/Desktop/data/output/2026/4D_shared/48_24_init/phantom_init_image.npy"
         init_image = np.load(init_image_path)
     else:
         init_image = None
