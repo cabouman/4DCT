@@ -70,7 +70,7 @@ if __name__ == "__main__":
     stride = 24
     # Use a slice to test on a subset of bins (e.g. slice(0, 4) for 4 bins).
     # Set to slice(None) to use all bins.
-    time_range = slice(None)
+    time_range = slice(0, -1)
 
     print("\n************** Split into time bins **************")
     bins = truncate_sino_into_time_bins(

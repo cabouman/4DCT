@@ -7,8 +7,7 @@
 #   2. Optionally adjust the flags below.
 #   3. Run:  bash test_script_4D.sh
 #
-# To resume from a previously saved init_image (skip the slow initialization),
-# add the --resume flag to the python command.
+
 
 DATA_PATH=/depot/bouman/data/Lilly/4DCT/Phantom_30s_Run1_Dec2024/
 OUTPUT_PATH=./output
