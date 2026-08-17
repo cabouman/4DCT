@@ -7,6 +7,7 @@ device per agent) contexts.
 """
 from __future__ import annotations
 
+import glob
 import os
 import threading
 
@@ -19,6 +20,47 @@ from scipy.fft import dct, idct
 # Thread-local denoiser cache: key = (shape, device), value = QGGMRFDenoiser.
 # Ensures no denoiser instance is shared across threads (critical for multi-GPU).
 _THREAD_LOCAL = threading.local()
+
+
+# ---------------------------------------------------------------------------
+# Bin parameter computation from nsipro
+# ---------------------------------------------------------------------------
+
+def compute_bin_params(data_path, angle_span_per_recon, angle_overlapping):
+    """
+    Compute views_per_bin and stride from the dataset's nsipro file.
+
+    Parameters
+    ----------
+    data_path : str
+        Path to the NSI dataset folder (must contain exactly one .nsipro file).
+    angle_span_per_recon : float
+        Angular span (degrees) covered by each time bin.
+    angle_overlapping : float
+        Angular overlap (degrees) between consecutive bins.
+
+    Returns
+    -------
+    views_per_bin : int
+    stride : int
+    """
+    nsipro_files = glob.glob(os.path.join(data_path, '*.nsipro'))
+    assert len(nsipro_files) == 1, \
+        f"Expected 1 .nsipro file in {data_path}, found {len(nsipro_files)}"
+
+    with open(nsipro_files[0]) as f:
+        lines = f.readlines()
+
+    start = next(i for i, l in enumerate(lines) if '<Object Radiograph>' in l)
+    end   = next(i for i, l in enumerate(lines) if '</Object Radiograph>' in l)
+    angle_step = float(next(
+        l.split('<angleStep>')[1].strip()
+        for l in lines[start:end] if '<angleStep>' in l
+    ))
+
+    views_per_bin = int(round(angle_span_per_recon / angle_step))
+    stride        = int(round((angle_span_per_recon - angle_overlapping) / angle_step))
+    return views_per_bin, stride
 
 
 # ---------------------------------------------------------------------------

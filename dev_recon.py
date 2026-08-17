@@ -25,7 +25,7 @@ import mbirjax.preprocess as mjp
 import numpy as np
 
 from model_4d import MACE4DModel
-from utils import truncate_sino_into_time_bins
+from utils import truncate_sino_into_time_bins, compute_bin_params
 
 if __name__ == "__main__":
 
@@ -66,10 +66,11 @@ if __name__ == "__main__":
     ct_model.set_params(sharpness=sharpness, verbose=verbose, positivity_flag=True)
 
     # ── Time bin splitting ─────────────────────────────────────────────────────
-    views_per_bin = 48
-    stride = 24
-    # Use a slice to test on a subset of bins (e.g. slice(0, 4) for 4 bins).
-    # Set to slice(None) to use all bins.
+    angle_span_per_recon = 120.0   # degrees covered per time bin
+    angle_overlapping    = 60.0    # degrees of overlap between bins
+
+    views_per_bin, stride = compute_bin_params(dataset_dir, angle_span_per_recon, angle_overlapping)
+
     time_range = slice(0, -1)
 
     print("\n************** Split into time bins **************")

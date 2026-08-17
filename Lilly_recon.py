@@ -31,7 +31,7 @@ import mbirjax.preprocess as mjp
 import numpy as np
 
 from model_4d import MACE4DModel
-from utils import truncate_sino_into_time_bins
+from utils import truncate_sino_into_time_bins, compute_bin_params
 
 if __name__ == "__main__":
 
@@ -84,9 +84,10 @@ if __name__ == "__main__":
     forward_num_iterations = 3
     stop_threshold = 0.02
     verbose = 1
-    # TODO: compute views_per_bin and stride from dataset config
-    views_per_bin = 48
-    stride = 24
+    angle_span_per_recon = 120.0   # degrees covered per time bin
+    angle_overlapping    = 60.0    # degrees of overlap between bins
+
+    views_per_bin, stride = compute_bin_params(args.data_path, angle_span_per_recon, angle_overlapping)
 
     # ── Preprocessing ──────────────────────────────────────────────────────────
     print("\n************** NSI dataset preprocessing **************")
