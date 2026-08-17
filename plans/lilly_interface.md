@@ -59,6 +59,8 @@ Entry point for Lilly production runs. Launched via `bash test_script_4D.sh` or 
 | `parallel` | `True` | 4-GPU ThreadPoolExecutor mode (requires ≥4 GPUs) |
 | `device_indices` | `[0,1,2,3]` | GPU assignment: `[forward, prior_xyt, prior_yzt, prior_xzt]` |
 
+> **Slurm note (Magtrain cluster):** Always request 4 GPUs when submitting the job, e.g. `--gres=gpu:4`.
+
 ---
 
 ## Outputs (written to `output_path/`)
