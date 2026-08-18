@@ -67,7 +67,8 @@ if __name__ == "__main__":
     # ── Time bin splitting ─────────────────────────────────────────────────────
     angle_span_per_recon = 120.0   # degrees covered per time bin
     angle_overlapping    = 60.0    # degrees of overlap between bins
-    dejitter_period = int(round(360.0 / angle_overlapping))  # period of the jitter introduced by sinogram gating
+    angle_march = angle_span_per_recon - angle_overlapping  # degrees advanced per bin step
+    dejitter_period = int(round(360.0 / angle_march))  # period of the jitter introduced by sinogram gating
 
     views_per_bin, stride = compute_bin_params(dataset_dir, angle_span_per_recon, angle_overlapping)
 

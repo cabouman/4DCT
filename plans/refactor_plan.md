@@ -11,16 +11,15 @@ Restructure the 4DCT repo to mirror the `mbirjax_applications/nsi` layout: a pro
 ```
 4DCT/
 ├── plans/
-│   └── refactor_plan.md          ← this file
+│   ├── refactor_plan.md          ← this file
+│   └── lilly_interface.md        ← parameter reference for Lilly operators
 ├── utils.py                      ← shared utilities (dejitter, binning, denoiser helpers)
 ├── model_4d.py                   ← MACE4DModel class (serial + parallel)
 ├── Lilly_recon.py                ← production CLI script (few argparse params)
 ├── dev_recon.py                  ← dev/exploration script (full parameter control)
-├── test_script_4D.sh                  ← shell script: edit DATA_PATH and run
+├── test_script_4D.sh             ← shell script: edit DATA_PATH and run
 ├── output/                       ← gitignored
-├── data/                         ← gitignored
-├── 4DMACE_serial/                ← kept unchanged for reference
-└── 4DMACE_multi_threads/         ← kept unchanged for reference
+└── data/                         ← gitignored
 ```
 
 ---
@@ -31,8 +30,9 @@ Restructure the 4DCT repo to mirror the `mbirjax_applications/nsi` layout: a pro
 All shared, stateless utilities. No main block. Merges the best of `utils_serial.py` and `utils_multi_threads.py`.
 
 Functions:
-- `truncate_sino_into_time_bins(sino, model, views_per_bin, stride)` — splits full sinogram into overlapping time bins (identical in both existing files)
-- `dejitter_4d_dct(recon_4d, period, ...)` — canonical DCT-I jitter removal (from `utils_multi_threads.py`)
+- `compute_bin_params(data_path, angle_span_per_recon, angle_overlapping)` — reads `<angleStep>` from the dataset's `.nsipro` file and returns `(views_per_bin, stride)`
+- `truncate_sino_into_time_bins(sino, model, views_per_bin, stride)` — splits full sinogram into overlapping time bins
+- `dejitter_4d_dct(recon_4d, period, ...)` — canonical DCT-I jitter removal
 - `normalize_prior_weights(prior_weight)` — float → [forward_w, xyt_w, yzt_w, xzt_w]
 - `get_qggmrf_denoiser(shape, device)` — thread-local, device-pinned denoiser cache (critical for multi-GPU correctness)
 - `estimate_sigma_per_hyperplane(x, device)` — per-hyperplane noise std on one device
@@ -94,9 +94,12 @@ Key variables:
 USE_SAVED_INIT_IMAGE = False   # flip to True to skip slow init
 dataset_url = "..."            # path to .tgz or extracted dir
 downsample_rate = [1, 1]
-views_per_bin = 48
-stride = 24
-time_range = slice(0, -1)     # subset of bins for quick tests
+angle_span_per_recon = 120.0   # degrees per time bin
+angle_overlapping    = 60.0    # degrees of overlap between bins
+angle_march = angle_span_per_recon - angle_overlapping   # degrees advanced per bin step
+dejitter_period = int(round(360.0 / angle_march))        # derived: 6
+views_per_bin, stride = compute_bin_params(...)           # derived from nsipro
+time_range = slice(0, -1)      # subset of bins for quick tests
 parallel = True                # False → serial mode
 device_indices = [0, 1, 2, 3]
 # ... all MACE hyperparameters
@@ -111,8 +114,6 @@ DATA_PATH=/depot/bouman/data/Lilly/4DCT/Phantom_30s_Run1_Dec2024/
 
 python Lilly_recon.py \
   --data_path "$DATA_PATH" \
-  --views_per_bin 48 \
-  --stride 24 \
   --max_mace_itr 10 \
   2>&1 | tee ~/4dct_logs/lilly_run.log
 ```
@@ -154,7 +155,8 @@ The following must not change across the refactor:
 | `sharpness` | 1.0 | mbirjax default, works well |
 | `sigma_p` | None | Auto-selected by mbirjax |
 | `dejitter` | True | Always needed for 4DCT phantom data |
-| `dejitter_period` | 6 | Fixed by the 6-phase gating protocol |
+| `angle_march` | derived | `angle_span_per_recon - angle_overlapping` = 60° (degrees per bin step) |
+| `dejitter_period` | derived | `int(round(360 / angle_march))` = 6 for 60° march |
 | `weight_type` | "transmission_root" | Standard for CT |
 | `device_indices` | [0,1,2,3] | Fixed cluster topology |
 
@@ -169,16 +171,18 @@ Both modes are kept via the `parallel` flag on `MACE4DModel.recon()`:
 - `parallel=True` (default): 4-GPU ThreadPoolExecutor. Requires ≥4 GPUs.
 - `parallel=False`: Sequential agents on a single device (`jax.devices()[0]`).
 
-The old `4DMACE_serial/` and `4DMACE_multi_threads/` directories are kept untouched as reference implementations. Over time, if serial mode is no longer needed, `_recon_serial` can be removed.
+The old `4DMACE_serial/` and `4DMACE_multi_threads/` directories have been deleted — their code is fully captured in `model_4d.py` and `utils.py`, and git history preserves the originals.
 
 ---
 
 ## Migration Steps
 
-1. Create `plans/refactor_plan.md` (this file)
-2. Create `utils.py` — merge + deduplicate both `utils_*.py` files
-3. Create `model_4d.py` — `MACE4DModel` class wrapping both recon modes
-4. Create `Lilly_recon.py` — production CLI script
-5. Create `dev_recon.py` — dev exploration script
-6. Create `test_script_4D.sh` — shell entry point
-7. Update `README.md` — describe new structure
+1. ✅ Create `plans/refactor_plan.md` (this file)
+2. ✅ Create `utils.py` — merge + deduplicate both `utils_*.py` files
+3. ✅ Create `model_4d.py` — `MACE4DModel` class wrapping both recon modes
+4. ✅ Create `Lilly_recon.py` — production CLI script
+5. ✅ Create `dev_recon.py` — dev exploration script
+6. ✅ Create `test_script_4D.sh` — shell entry point
+7. ✅ Add `compute_bin_params` to `utils.py`; derive `dejitter_period` from `angle_overlapping`
+8. ✅ Delete legacy `4DMACE_serial/` and `4DMACE_multi_threads/` directories
+9. ✅ Add `plans/lilly_interface.md` — operator parameter reference
