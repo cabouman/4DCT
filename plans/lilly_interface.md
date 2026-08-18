@@ -31,13 +31,14 @@ Entry point for Lilly production runs. Launched via `bash test_script_4D.sh` or 
 
 ### Scan geometry — derived automatically from the `.nsipro` file
 
-| Parameter | Value | How it's set |
-|---|---|---|
-| `angle_span_per_recon` | `120.0°` | Degrees covered per time bin — hardcoded in script |
-| `angle_overlapping` | `60.0°` | Angular overlap between consecutive bins — hardcoded in script |
-| `views_per_bin` | derived | `round(angle_span / angle_step)` via `compute_bin_params()` |
-| `stride` | derived | `round((angle_span - overlap) / angle_step)` via `compute_bin_params()` |
-| `dejitter_period` | derived | `round(360 / angle_overlapping)` = 6 for 60° overlap |
+| Parameter | Value | How it's set                                                                     |
+|---|---|----------------------------------------------------------------------------------|
+| `angle_span_per_recon` | `120.0°` | Degrees covered per time bin — hardcoded in script for now                       |
+| `angle_overlapping` | `60.0°` | Angular overlap between consecutive bins — hardcoded in script for now           |
+| `angle_march` | derived | `angle_span_per_recon - angle_overlapping` = 60° (degrees advanced per bin step) |
+| `views_per_bin` | derived | `round(angle_span / angle_step)` via `compute_bin_params()`                      |
+| `stride` | derived | `round(angle_march / angle_step)` via `compute_bin_params()`                     |
+| `dejitter_period` | derived | `round(360 / angle_march)` = 6 for 60° march                                     |
 
 ### MACE algorithm
 

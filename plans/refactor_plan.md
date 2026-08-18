@@ -96,7 +96,8 @@ dataset_url = "..."            # path to .tgz or extracted dir
 downsample_rate = [1, 1]
 angle_span_per_recon = 120.0   # degrees per time bin
 angle_overlapping    = 60.0    # degrees of overlap between bins
-dejitter_period = int(round(360.0 / angle_overlapping))  # derived: 6
+angle_march = angle_span_per_recon - angle_overlapping   # degrees advanced per bin step
+dejitter_period = int(round(360.0 / angle_march))        # derived: 6
 views_per_bin, stride = compute_bin_params(...)           # derived from nsipro
 time_range = slice(0, -1)      # subset of bins for quick tests
 parallel = True                # False → serial mode
@@ -154,7 +155,8 @@ The following must not change across the refactor:
 | `sharpness` | 1.0 | mbirjax default, works well |
 | `sigma_p` | None | Auto-selected by mbirjax |
 | `dejitter` | True | Always needed for 4DCT phantom data |
-| `dejitter_period` | derived | `int(round(360 / angle_overlapping))` = 6 for 60° overlap |
+| `angle_march` | derived | `angle_span_per_recon - angle_overlapping` = 60° (degrees per bin step) |
+| `dejitter_period` | derived | `int(round(360 / angle_march))` = 6 for 60° march |
 | `weight_type` | "transmission_root" | Standard for CT |
 | `device_indices` | [0,1,2,3] | Fixed cluster topology |
 
