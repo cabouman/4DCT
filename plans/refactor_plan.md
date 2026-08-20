@@ -133,6 +133,28 @@ The following must not change across the refactor:
 
 ---
 
+## Computation Imbalance Across Agents (Future Optimization)
+
+The four agents do not carry equal workloads. For a representative 4D dataset of size **98 × 260 × 260 × 728** (T × X × Y × Z):
+
+| Agent | Role | Workload |
+|-------|------|----------|
+| Agent 1 | Forward prox (`prox_map`) for all time bins | 98 3D volumes processed in serial |
+| Agent 2 | 4D denoiser — t-XY planes | 728 3D volumes of size 260 × 260 × 98 |
+| Agent 3 | 4D denoiser — t-YZ planes | 260 3D volumes of size 260 × 728 × 98 |
+| Agent 4 | 4D denoiser — t-XZ planes | 260 3D volumes of size 260 × 728 × 98 |
+
+Agent 2 processes nearly 3× as many volumes as Agents 3/4, and Agent 1 (forward prox) is the most expensive step overall and runs sequentially across bins. This means the wall-clock time is dominated by whichever agent finishes last, with the others idle.
+
+Possible future mitigations:
+- Split Agent 2's 728 volumes across multiple GPUs (requires more than 4 GPUs or dynamic work-stealing).
+- Overlap Agent 1's forward prox with prior agents from the previous iteration.
+- Profile per-agent runtime to quantify the actual imbalance before investing in fixes.
+
+No action needed now — the current 4-GPU layout is validated and correct. This is a note for future performance work.
+
+---
+
 ## Interface Discussion — What to Expose vs. Hard-code
 
 ### Always Lilly-accessible (CLI flags)
