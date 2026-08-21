@@ -4,7 +4,7 @@
 
 ## Quick Start (Lilly)
 
-Edit `DATA_PATH` in `run_lilly.sh` to point to your extracted NSI dataset, then:
+Edit `DATA_PATH` in `test_script_4D.sh` to point to your extracted NSI dataset, then:
 
 ```bash
 bash test_script_4D.sh
@@ -15,29 +15,31 @@ Output is written to `./output/`:
 - `init/init_image.npy` — per-bin MBIR initialization (saved for potential reuse)
 - `timing_log.csv` — per-iteration agent timing
 
-To skip re-initialization on a second run, add `--resume` to the python command in `run_lilly.sh`.
+To skip re-initialization on a second run, add `--resume <path-to-init_image.npy>` to the python command in `test_script_4D.sh` (a commented placeholder is already there).
 
 ## Layout
 
 ```
 4DCT/
-├── run_lilly.sh          # shell entry point — edit DATA_PATH and run
-├── lilly_recon.py        # production CLI script (few argparse flags)
+├── test_script_4D.sh     # shell entry point — edit DATA_PATH and run
+├── Lilly_recon.py        # production CLI script (few argparse flags)
 ├── dev_recon.py          # dev/exploration script (all params as Python variables)
 ├── model_4d.py           # MACE4DModel class (serial + multi-GPU)
 ├── utils.py              # shared utilities (time binning, dejitter, denoiser helpers)
 ├── plans/
-│   └── refactor_plan.md  # design decisions and interface discussion
-├── 4DMACE_serial/        # original serial implementation (reference)
-└── 4DMACE_multi_threads/ # original multi-GPU implementation (reference)
+│   ├── refactor_plan.md  # design decisions and interface discussion
+│   └── lilly_interface.md # parameter reference for Lilly operators
+└── tmp/                  # setup helpers (install deps, download data)
 ```
+
+The original serial and multi-GPU implementations (`4DMACE_serial/`, `4DMACE_multi_threads/`) were merged into `model_4d.py` and `utils.py`; git history preserves them.
 
 ## File Roles
 
 | File | Purpose |
 |------|---------|
-| `run_lilly.sh` | Shell entry point. Edit `DATA_PATH`; everything else has sensible defaults. |
-| `lilly_recon.py` | Production script. Minimal CLI: data path, downsampling, bin params, iteration count. Algorithmic hyperparameters are fixed. |
+| `test_script_4D.sh` | Shell entry point. Edit `DATA_PATH`; everything else has sensible defaults. |
+| `Lilly_recon.py` | Production script. Minimal CLI: data path, downsampling, bin params, iteration count. Algorithmic hyperparameters are fixed. |
 | `dev_recon.py` | Dev script. All parameters are Python variables at the top. Supports `USE_SAVED_INIT_IMAGE`, `parallel`, `time_range`, custom `device_indices`, etc. |
 | `model_4d.py` | `MACE4DModel` class. Call `model.recon(parallel=True)` for multi-GPU or `model.recon(parallel=False)` for serial. |
 | `utils.py` | Stateless helpers shared by both modes: `truncate_sino_into_time_bins`, `dejitter_4d_dct`, denoiser utilities. |

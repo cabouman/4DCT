@@ -19,11 +19,15 @@ Entry point for Lilly production runs. Launched via `bash test_script_4D.sh` or 
 | Flag | Default | Meaning |
 |---|---|---|
 | `--data_path` | *(required)* | Same as `DATA_PATH` above |
-| `--downsample` | `1` | Detector pixel subsampling factor (rows and channels); increase to trade resolution for speed |
+| `--downsample_row` | `1` | Detector row subsampling factor; increase to trade resolution for speed |
+| `--downsample_column` | `1` | Detector column subsampling factor; increase to trade resolution for speed |
 | `--subsample_view_factor` | `1` | View subsampling factor; increase to use fewer projection angles |
+| `--angle_span_per_recon` | `120.0` | Degrees covered per time bin |
+| `--angle_advancing` | `60.0` | Degrees advanced per bin step (= span − overlap) |
 | `--max_mace_itr` | `10` | Number of outer MACE iterations |
 | `--output_path` | `./output` | Output directory |
-| `--resume` | *(flag, off by default)* | If set, reloads a previously saved `init_image.npy` from `output_path/init/` instead of recomputing it |
+| `--num_frames` | *(all bins)* | Reconstruct only the first N time bins |
+| `--resume` | *(off by default)* | Path to a previously saved `init_image.npy`; skips recomputing the initialization |
 
 ---
 
@@ -33,12 +37,11 @@ Entry point for Lilly production runs. Launched via `bash test_script_4D.sh` or 
 
 | Parameter | Value | How it's set                                                                     |
 |---|---|----------------------------------------------------------------------------------|
-| `angle_span_per_recon` | `120.0°` | Degrees covered per time bin — hardcoded in script for now                       |
-| `angle_overlapping` | `60.0°` | Angular overlap between consecutive bins — hardcoded in script for now           |
-| `angle_march` | derived | `angle_span_per_recon - angle_overlapping` = 60° (degrees advanced per bin step) |
-| `views_per_bin` | derived | `round(angle_span / angle_step)` via `compute_bin_params()`                      |
-| `stride` | derived | `round(angle_march / angle_step)` via `compute_bin_params()`                     |
-| `dejitter_period` | derived | `round(360 / angle_march)` = 6 for 60° march                                     |
+| `views_per_bin` | derived | `round(angle_span_per_recon / angle_step)` via `compute_bin_params()`            |
+| `stride` | derived | `round(angle_advancing / angle_step)` via `compute_bin_params()`                 |
+| `dejitter_period` | derived | `round(360 / angle_advancing)` = 6 for 60° advance                               |
+
+`angle_span_per_recon` and `angle_advancing` are CLI flags (defaults 120° and 60°); see the table above.
 
 ### MACE algorithm
 
