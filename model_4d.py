@@ -159,33 +159,9 @@ class MACE4DModel:
         beta = self.beta
         verbose = self.verbose
 
-        # ── Device setup ───────────────────────────────────────────────────────
-        if parallel:
-            devices = jax.devices("gpu")
-            if len(devices) < 4:
-                raise RuntimeError(f"Need at least 4 GPUs, found {len(devices)}.")
-            if device_indices is None:
-                device_indices = [0, 1, 2, 3]
-            agent_devices = [devices[i] for i in device_indices]
-            if verbose:
-                print(f"[MACE] Found {len(devices)} GPU(s): {devices}")
-                print(
-                    "[MACE] GPU assignment: "
-                    + ", ".join(f"Agent{k}->GPU{idx}" for k, idx in enumerate(device_indices))
-                )
-        else:
-            agent_devices = [jax.devices()[0]] * 4
+        agent_devices = self._setup_devices(parallel, device_indices)
         if verbose:
             print(f"[MACE] Start 4D reconstruction with {nt} time frames.")
-
-        # ── SINGLE-GPU FIX: pin each per-frame ConeBeamModel to one device ─────
-        # Without this, every model auto-shards across all GPUs on first call,
-        # causing all 4 agents to open a 4-way NCCL clique simultaneously →
-        # deadlock ("Acquire clique ... may be stuck").
-        for t in range(nt):
-            self.model_list[t].configure_devices([agent_devices[0]])
-        if verbose:
-            print(f"[MACE] Pinned all {nt} ConeBeamModel instances to {agent_devices[0]}.")
 
         # ── Initialization ─────────────────────────────────────────────────────
         if init_image is None:
@@ -195,22 +171,7 @@ class MACE4DModel:
             if verbose:
                 print("[MACE] Using provided init_image.")
 
-        # ── Sigma precomputation (one-time, device-pinned) ─────────────────────
-        if verbose:
-            print("[MACE] Precomputing sigma lists...")
-        sigma_lists = [
-            estimate_sigma_per_hyperplane(
-                np.transpose(init_image, perm), device=agent_devices[k + 1]
-            )
-            for k, (_, perm) in enumerate(PRIOR_ORIENTATIONS)
-        ]
-        if verbose:
-            counts = ", ".join(
-                f"{name}={np.count_nonzero(s > 1e-6)}/{s.size}"
-                for (name, _), s in zip(PRIOR_ORIENTATIONS, sigma_lists)
-            )
-            print(f"[MACE] Nonzero sigma counts: {counts}")
-            print("[MACE] Sigma precomputation done.")
+        sigma_lists = self._compute_sigma_lists(init_image, agent_devices)
 
         # ── MACE state (all on CPU / NumPy) ────────────────────────────────────
         W = [np.copy(init_image) for _ in range(4)]
@@ -286,6 +247,53 @@ class MACE4DModel:
     # ------------------------------------------------------------------
     # Agents and helpers
     # ------------------------------------------------------------------
+
+    def _setup_devices(self, parallel, device_indices):
+        """Pick one device per agent and pin every per-frame model to Agent 0's device."""
+        if parallel:
+            devices = jax.devices("gpu")
+            if len(devices) < 4:
+                raise RuntimeError(f"Need at least 4 GPUs, found {len(devices)}.")
+            if device_indices is None:
+                device_indices = [0, 1, 2, 3]
+            agent_devices = [devices[i] for i in device_indices]
+            if self.verbose:
+                print(f"[MACE] Found {len(devices)} GPU(s): {devices}")
+                print(
+                    "[MACE] GPU assignment: "
+                    + ", ".join(f"Agent{k}->GPU{idx}" for k, idx in enumerate(device_indices))
+                )
+        else:
+            agent_devices = [jax.devices()[0]] * 4
+
+        # SINGLE-GPU FIX: pin each per-frame ConeBeamModel to one device.
+        # Without this, every model auto-shards across all GPUs on first call,
+        # causing all 4 agents to open a 4-way NCCL clique simultaneously →
+        # deadlock ("Acquire clique ... may be stuck").
+        for t in range(self.nt):
+            self.model_list[t].configure_devices([agent_devices[0]])
+        if self.verbose:
+            print(f"[MACE] Pinned all {self.nt} ConeBeamModel instances to {agent_devices[0]}.")
+        return agent_devices
+
+    def _compute_sigma_lists(self, init_image, agent_devices):
+        """Per-hyperplane noise sigmas for each prior orientation (one-time, device-pinned)."""
+        if self.verbose:
+            print("[MACE] Precomputing sigma lists...")
+        sigma_lists = [
+            estimate_sigma_per_hyperplane(
+                np.transpose(init_image, perm), device=agent_devices[k + 1]
+            )
+            for k, (_, perm) in enumerate(PRIOR_ORIENTATIONS)
+        ]
+        if self.verbose:
+            counts = ", ".join(
+                f"{name}={np.count_nonzero(s > 1e-6)}/{s.size}"
+                for (name, _), s in zip(PRIOR_ORIENTATIONS, sigma_lists)
+            )
+            print(f"[MACE] Nonzero sigma counts: {counts}")
+            print("[MACE] Sigma precomputation done.")
+        return sigma_lists
 
     def _run_forward_agent(self, W_k, X_prev, device):
         """Agent 0: cone-beam prox_map, one time frame at a time, on one device."""

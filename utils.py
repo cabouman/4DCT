@@ -109,7 +109,8 @@ def dejitter_4d_dct(
     dtype : np.dtype
         Working dtype (float32 reduces memory).
     chunk_size : int or None
-        If set, process the last spatial axis in chunks to reduce peak memory.
+        Process the last spatial axis in chunks of this size to reduce peak
+        memory. None processes the whole axis in one pass.
     verbose : bool
         Print the modes being zeroed.
 
@@ -120,17 +121,6 @@ def dejitter_4d_dct(
     recon_4d = np.asarray(recon_4d)
     N = recon_4d.shape[0]
     spatial_shape = recon_4d.shape[1:]
-
-    def period_to_dct1_k(p, N):
-        return 2 * (N - 1) / p
-
-    def zero_dct_band_inplace(C, k_center, band_width):
-        k0 = int(round(k_center))
-        lo = max(0, k0 - band_width)
-        hi = min(C.shape[0], k0 + band_width + 1)
-        if lo < hi:
-            C[lo:hi, ...] = 0
-        return lo, hi, k0
 
     if harmonics is False:
         harmonic_list = [1]
@@ -146,13 +136,23 @@ def dejitter_4d_dct(
         print("Input shape:", recon_4d.shape)
         print("Periods to remove:", periods_to_remove)
 
+    Z = spatial_shape[-1]
     if chunk_size is None:
-        X = np.asarray(recon_4d, dtype=dtype).reshape(N, -1)
-        C = dct(X, type=1, norm="ortho", axis=0)
+        chunk_size = Z
+
+    recon_dejittered = np.empty((N,) + spatial_shape, dtype=dtype)
+    for z0 in range(0, Z, chunk_size):
+        z1 = min(z0 + chunk_size, Z)
+        block = np.asarray(recon_4d[..., z0:z1], dtype=dtype)
+        C = dct(block, type=1, norm="ortho", axis=0)
         for p in periods_to_remove:
-            k_center = period_to_dct1_k(p, N)
-            lo, hi, k0 = zero_dct_band_inplace(C, k_center, band_width)
-            if verbose:
+            k_center = 2 * (N - 1) / p
+            k0 = int(round(k_center))
+            lo = max(0, k0 - band_width)
+            hi = min(C.shape[0], k0 + band_width + 1)
+            if lo < hi:
+                C[lo:hi, ...] = 0
+            if verbose and z0 == 0:
                 actual_period = 2 * (N - 1) / k0 if k0 != 0 else np.inf
                 print(
                     f"  Removed period {p:.3g}: "
@@ -160,32 +160,9 @@ def dejitter_4d_dct(
                     f"actual period≈{actual_period:.3g}, "
                     f"zeroed k={lo}:{hi - 1}"
                 )
-        X_filtered = idct(C, type=1, norm="ortho", axis=0)
-        return X_filtered.reshape((N,) + spatial_shape).astype(dtype, copy=False)
-    else:
-        recon_dejittered = np.empty((N,) + spatial_shape, dtype=dtype)
-        Z = spatial_shape[-1]
-        for z0 in range(0, Z, chunk_size):
-            z1 = min(z0 + chunk_size, Z)
-            if verbose:
-                print(f"  Processing chunk z={z0}:{z1}")
-            block = np.asarray(recon_4d[..., z0:z1], dtype=dtype)
-            C = dct(block, type=1, norm="ortho", axis=0)
-            for p in periods_to_remove:
-                k_center = period_to_dct1_k(p, N)
-                lo, hi, k0 = zero_dct_band_inplace(C, k_center, band_width)
-                if verbose and z0 == 0:
-                    actual_period = 2 * (N - 1) / k0 if k0 != 0 else np.inf
-                    print(
-                        f"  Removed period {p:.3g}: "
-                        f"k≈{k_center:.2f}, rounded k={k0}, "
-                        f"actual period≈{actual_period:.3g}, "
-                        f"zeroed k={lo}:{hi - 1}"
-                    )
-            block_filtered = idct(C, type=1, norm="ortho", axis=0)
-            recon_dejittered[..., z0:z1] = block_filtered.astype(dtype, copy=False)
-            del block, C, block_filtered
-        return recon_dejittered
+        recon_dejittered[..., z0:z1] = idct(C, type=1, norm="ortho", axis=0).astype(dtype, copy=False)
+        del block, C
+    return recon_dejittered
 
 
 # ---------------------------------------------------------------------------
@@ -200,10 +177,15 @@ def normalize_prior_weights(prior_weight):
     List/tuple [w1, w2, w3] → [1-(w1+w2+w3), w1, w2, w3].
     """
     if isinstance(prior_weight, (list, tuple, np.ndarray)):
-        prior = list(prior_weight)
-        return [1.0 - sum(prior)] + prior
-    w = prior_weight
-    return [1.0 - w, w / 3.0, w / 3.0, w / 3.0]
+        prior = [float(w) for w in prior_weight]
+        if len(prior) != 3:
+            raise ValueError("prior_weight list must have 3 entries [xyt, yzt, xzt].")
+    else:
+        w = float(prior_weight) / 3.0
+        prior = [w, w, w]
+    if any(w < 0 for w in prior) or sum(prior) > 1.0:
+        raise ValueError("prior weights must be nonnegative and sum to at most 1.")
+    return [1.0 - sum(prior)] + prior
 
 
 # ---------------------------------------------------------------------------
@@ -313,11 +295,11 @@ def denoiser_wrapper(x, permute_vector, sigma_list, device):
 
 def gen_gif_and_save(recon, gif_path, vmin=0, vmax=0.06, z_slice=None, duration=0.15):
     """
-    Generate a GIF of a 4D reconstruction stepping through time frames.
+    Generate a GIF of one z slice of a 4D reconstruction stepping through time frames.
 
     Parameters
     ----------
-    recon : ndarray, shape (T, Z, X, Y)
+    recon : ndarray, shape (nt, nx, ny, nz)
     gif_path : str
         Output path for the saved GIF.
     vmin, vmax : float
@@ -328,12 +310,12 @@ def gen_gif_and_save(recon, gif_path, vmin=0, vmax=0.06, z_slice=None, duration=
         Duration per frame in seconds.
     """
     if z_slice is None:
-        z_slice = recon.shape[1] // 2
+        z_slice = recon.shape[3] // 2
 
     frames = []
     for t in range(recon.shape[0]):
         fig, ax = plt.subplots(1, 1, figsize=(6, 6))
-        ax.imshow(recon[t, z_slice, :, :], cmap='gray', vmin=vmin, vmax=vmax)
+        ax.imshow(recon[t, :, :, z_slice], cmap='gray', vmin=vmin, vmax=vmax)
         ax.set_title(f't={t}')
         ax.axis('off')
         fig.suptitle(f'z slice = {z_slice}, time frame = {t}', fontsize=14)
