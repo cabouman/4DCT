@@ -1,16 +1,13 @@
 """
 4D MACE reconstruction model.
 
-MACE4DModel wraps the 4-agent MACE algorithm (one cone-beam prox_map agent +
-three qGGMRF prior agents across XY-t, YZ-t, XZ-t hyperplanes) in a class
-with a single recon() entry point. Two execution modes are available:
+MACE4DModel runs the 4-agent MACE algorithm (one cone-beam prox_map agent +
+three qGGMRF prior agents across XY-t, YZ-t, XZ-t hyperplanes) behind a single
+recon() entry point. One MACE loop serves both execution modes:
 
-  parallel=True  — ThreadPoolExecutor(4), one agent per GPU. Requires ≥4 GPUs.
-                   All GPU-pinning and NCCL-safety logic lives here.
-  parallel=False — Sequential agents on jax.devices()[0].
-
-The multi-GPU implementation is preserved verbatim from
-4DMACE_multi_threads/utils_multi_threads.py; only the wrapping is new.
+  parallel=True  — agents run concurrently in a ThreadPoolExecutor, one GPU
+                   each (requires ≥4 GPUs). GPU pinning prevents NCCL deadlock.
+  parallel=False — the same agents run sequentially on jax.devices()[0].
 """
 from __future__ import annotations
 
@@ -37,6 +34,15 @@ PRIOR_ORIENTATIONS = [
     ("XY-t", (3, 0, 1, 2)),  # nz hyperplanes of shape (nt, nx, ny)
     ("YZ-t", (1, 0, 2, 3)),  # nx hyperplanes of shape (nt, ny, nz)
     ("XZ-t", (2, 0, 1, 3)),  # ny hyperplanes of shape (nt, nx, nz)
+]
+
+TIMING_FIELDS = [
+    "iteration",
+    "agent_0_forward_sec",
+    "agent_1_prior_xyt_sec",
+    "agent_2_prior_yzt_sec",
+    "agent_3_prior_xzt_sec",
+    "iteration_total_sec",
 ]
 
 
@@ -135,108 +141,66 @@ class MACE4DModel:
             Initial 4D image, shape (nt, nx, ny, nz). If None, a per-frame
             MBIR recon is computed automatically and saved to init_save_dir.
         parallel : bool
-            True  → 4-GPU ThreadPoolExecutor (requires ≥4 GPUs).
-            False → sequential agents on a single device.
+            True  → agents run concurrently, one GPU each (requires ≥4 GPUs).
+            False → the same agents run sequentially on a single device.
         init_save_dir : str or None
             Directory where the computed init_image is saved as init_image.npy.
         timing_log_path : str or None
-            CSV file for per-iteration agent timing (parallel mode only).
+            CSV file for per-iteration agent timing.
         device_indices : list of int or None
-            GPU indices for [forward, prior_xyt, prior_yzt, prior_xzt].
-            Default: [0, 1, 2, 3].
+            GPU indices for [forward, prior_xyt, prior_yzt, prior_xzt] in
+            parallel mode. Default: [0, 1, 2, 3].
 
         Returns
         -------
         recon_4d : ndarray, shape (nt, nx, ny, nz)
         """
-        if parallel:
-            return self._recon_parallel(
-                init_image=init_image,
-                init_save_dir=init_save_dir,
-                timing_log_path=timing_log_path,
-                device_indices=device_indices,
-            )
-        else:
-            return self._recon_serial(
-                init_image=init_image,
-                init_save_dir=init_save_dir,
-            )
-
-    # ------------------------------------------------------------------
-    # Multi-GPU implementation (ThreadPoolExecutor)
-    # ------------------------------------------------------------------
-
-    def _recon_parallel(self, init_image, init_save_dir, timing_log_path, device_indices):
         nt = self.nt
-        sino_list = self.sino_list
-        weights_list = self.weights_list
-        models = self.model_list
         beta = self.beta
-        sigma_p = self.sigma_p
         verbose = self.verbose
 
-        # ── GPU discovery ──────────────────────────────────────────────────────
-        devices = jax.devices("gpu")
-        n_gpu = len(devices)
-        if n_gpu == 0:
-            raise RuntimeError("No GPU devices found by JAX.")
-        if n_gpu < 4:
-            raise RuntimeError(f"Need at least 4 GPUs, found {n_gpu}.")
-
-        if device_indices is None:
-            device_indices = [0, 1, 2, 3]
-
+        # ── Device setup ───────────────────────────────────────────────────────
+        if parallel:
+            devices = jax.devices("gpu")
+            if len(devices) < 4:
+                raise RuntimeError(f"Need at least 4 GPUs, found {len(devices)}.")
+            if device_indices is None:
+                device_indices = [0, 1, 2, 3]
+            agent_devices = [devices[i] for i in device_indices]
+            if verbose:
+                print(f"[MACE] Found {len(devices)} GPU(s): {devices}")
+                print(
+                    "[MACE] GPU assignment: "
+                    + ", ".join(f"Agent{k}->GPU{idx}" for k, idx in enumerate(device_indices))
+                )
+        else:
+            agent_devices = [jax.devices()[0]] * 4
         if verbose:
-            print(f"[MACE] Found {n_gpu} GPU(s): {devices}")
-            print(
-                "[MACE] GPU assignment: "
-                + ", ".join(f"Agent{k}->GPU{idx}" for k, idx in enumerate(device_indices))
-            )
             print(f"[MACE] Start 4D reconstruction with {nt} time frames.")
 
-        # ── SINGLE-GPU FIX: pin each per-frame ConeBeamModel to Agent 0's GPU ──
+        # ── SINGLE-GPU FIX: pin each per-frame ConeBeamModel to one device ─────
         # Without this, every model auto-shards across all GPUs on first call,
         # causing all 4 agents to open a 4-way NCCL clique simultaneously →
         # deadlock ("Acquire clique ... may be stuck").
-        forward_device = devices[device_indices[0]]
         for t in range(nt):
-            models[t].configure_devices([forward_device])
+            self.model_list[t].configure_devices([agent_devices[0]])
         if verbose:
-            print(f"[MACE] Pinned all {nt} ConeBeamModel instances to {forward_device}.")
+            print(f"[MACE] Pinned all {nt} ConeBeamModel instances to {agent_devices[0]}.")
 
         # ── Initialization ─────────────────────────────────────────────────────
-        init_device = devices[device_indices[0]]
         if init_image is None:
-            if verbose:
-                print(f"[MACE] Computing initial MBIR recon on GPU {device_indices[0]} (serial)...")
-            t0 = time.time()
-            init_image = np.stack([
-                np.asarray(
-                    models[t].recon(
-                        jax.device_put(jnp.asarray(sino_list[t]), init_device),
-                        weights=jax.device_put(jnp.asarray(weights_list[t]), init_device),
-                        max_iterations=15,
-                        stop_threshold_change_pct=self.stop_threshold,
-                    )[0]
-                )
-                for t in range(nt)
-            ])
-            if init_save_dir is not None:
-                os.makedirs(init_save_dir, exist_ok=True)
-                np.save(os.path.join(init_save_dir, "init_image.npy"), init_image)
-            if verbose:
-                print(f"[MACE] Initialization done in {time.time() - t0:.2f} sec.")
+            init_image = self._compute_init_image(agent_devices[0], init_save_dir)
         else:
             init_image = np.asarray(init_image)
             if verbose:
                 print("[MACE] Using provided init_image.")
 
-        # ── Sigma precomputation (one-time, device-pinned) ────────────────────
+        # ── Sigma precomputation (one-time, device-pinned) ─────────────────────
         if verbose:
             print("[MACE] Precomputing sigma lists...")
         sigma_lists = [
             estimate_sigma_per_hyperplane(
-                np.transpose(init_image, perm), device=devices[device_indices[k + 1]]
+                np.transpose(init_image, perm), device=agent_devices[k + 1]
             )
             for k, (_, perm) in enumerate(PRIOR_ORIENTATIONS)
         ]
@@ -248,77 +212,17 @@ class MACE4DModel:
             print(f"[MACE] Nonzero sigma counts: {counts}")
             print("[MACE] Sigma precomputation done.")
 
-        # ── MACE state (all on CPU / NumPy) ───────────────────────────────────
+        # ── MACE state (all on CPU / NumPy) ────────────────────────────────────
         W = [np.copy(init_image) for _ in range(4)]
         X = [np.copy(init_image) for _ in range(4)]
 
-        # ── Timing log ────────────────────────────────────────────────────────
+        # ── Timing log ─────────────────────────────────────────────────────────
         if timing_log_path is not None:
             timing_log_dir = os.path.dirname(timing_log_path)
             if timing_log_dir:
                 os.makedirs(timing_log_dir, exist_ok=True)
             with open(timing_log_path, "w", newline="") as f:
-                csv.DictWriter(
-                    f,
-                    fieldnames=[
-                        "iteration",
-                        "agent_0_forward_sec",
-                        "agent_1_prior_xyt_sec",
-                        "agent_2_prior_yzt_sec",
-                        "agent_3_prior_xzt_sec",
-                        "iteration_total_sec",
-                    ],
-                ).writeheader()
-
-        # ── Agent closures ─────────────────────────────────────────────────────
-        # Closures capture: devices, device_indices, sino_list, weights_list,
-        # models, sigma_lists, sigma_p, nt, self.*. They are submitted to the
-        # ThreadPoolExecutor below; each runs on its own OS thread.
-
-        def run_forward_agent(W_k, X_prev, device_index):
-            """Agent 0: cone-beam prox_map, serial over time frames, one GPU."""
-            device = devices[device_index]
-            agent_t0 = time.time()
-            out = np.stack([
-                np.asarray(
-                    models[t].prox_map(
-                        prox_input=jax.device_put(jnp.asarray(W_k[t]), device),
-                        sinogram=jax.device_put(jnp.asarray(sino_list[t]), device),
-                        sigma_prox=sigma_p,
-                        weights=jax.device_put(jnp.asarray(weights_list[t]), device),
-                        init_recon=jax.device_put(jnp.asarray(X_prev[t]), device),
-                        max_iterations=self.num_prox_iterations,
-                        stop_threshold_change_pct=self.stop_threshold,
-                    )[0]
-                )
-                for t in range(nt)
-            ])
-            if self.dejitter:
-                out = dejitter_4d_dct(
-                    out, period=self.dejitter_period,
-                    harmonics=True, band_width=1,
-                    chunk_size=None, dtype=np.float32, verbose=bool(verbose),
-                )
-            agent_sec = time.time() - agent_t0
-            if verbose:
-                print(f"[MACE]  Agent 0 ran on {device} in {agent_sec:.2f} sec.")
-            return out, agent_sec
-
-        def run_prior_agent(W_k, device_index, permute_vector, sigma_list, agent_name):
-            """Prior agent: qGGMRF denoising of one hyperplane orientation."""
-            device = devices[device_index]
-            agent_t0 = time.time()
-            if self.dejitter:
-                W_k = dejitter_4d_dct(
-                    W_k, period=self.dejitter_period,
-                    harmonics=True, band_width=1,
-                    chunk_size=None, dtype=np.float32, verbose=bool(verbose),
-                )
-            out = denoiser_wrapper(W_k, permute_vector=permute_vector, sigma_list=sigma_list, device=device)
-            agent_sec = time.time() - agent_t0
-            if verbose:
-                print(f"[MACE]  Prior agent {agent_name} ran on {device} in {agent_sec:.2f} sec.")
-            return out, agent_sec
+                csv.DictWriter(f, fieldnames=TIMING_FIELDS).writeheader()
 
         # ── Main MACE loop ─────────────────────────────────────────────────────
         for itr in range(self.max_mace_itr):
@@ -330,26 +234,29 @@ class MACE4DModel:
             W_snap = [np.copy(W[k]) for k in range(4)]
             agent_times = {}
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-                futures = {
-                    pool.submit(run_forward_agent, W_snap[0], X[0], device_indices[0]): (0, "forward"),
-                }
+            if parallel:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                    futures = {
+                        pool.submit(self._run_forward_agent, W_snap[0], X[0],
+                                    agent_devices[0]): (0, "forward"),
+                    }
+                    for k, (name, perm) in enumerate(PRIOR_ORIENTATIONS, start=1):
+                        fut = pool.submit(self._run_prior_agent, W_snap[k], agent_devices[k],
+                                          perm, sigma_lists[k - 1], name)
+                        futures[fut] = (k, f"prior {name}")
+                    for fut in concurrent.futures.as_completed(futures):
+                        agent_id, agent_name = futures[fut]
+                        X[agent_id], agent_times[agent_id] = fut.result()
+                        if verbose:
+                            print(
+                                f"[MACE]  Agent {agent_id} ({agent_name}) done "
+                                f"at +{time.time() - itr_t0:.2f} sec."
+                            )
+            else:
+                X[0], agent_times[0] = self._run_forward_agent(W_snap[0], X[0], agent_devices[0])
                 for k, (name, perm) in enumerate(PRIOR_ORIENTATIONS, start=1):
-                    fut = pool.submit(run_prior_agent, W_snap[k], device_indices[k],
-                                      perm, sigma_lists[k - 1], name)
-                    futures[fut] = (k, f"prior {name}")
-                for fut in concurrent.futures.as_completed(futures):
-                    agent_id, agent_name = futures[fut]
-                    done_t0 = time.time()
-                    X[agent_id], agent_times[agent_id] = fut.result()
-                    if verbose:
-                        print(
-                            f"[MACE]  Agent {agent_id} ({agent_name}) done "
-                            f"at +{done_t0 - itr_t0:.2f} sec."
-                        )
-
-            if verbose:
-                print("[MACE]  All agents done. Running consensus update...")
+                    X[k], agent_times[k] = self._run_prior_agent(
+                        W_snap[k], agent_devices[k], perm, sigma_lists[k - 1], name)
 
             # ADMM consensus (CPU)
             z = sum(beta[k] * (2.0 * X[k] - W[k]) for k in range(4))
@@ -357,28 +264,18 @@ class MACE4DModel:
                 W[k] = W[k] + 2.0 * self.rho * (z - X[k])
 
             iteration_sec = time.time() - itr_t0
-            timing_row = {
-                "iteration": itr + 1,
-                "agent_0_forward_sec": agent_times[0],
-                "agent_1_prior_xyt_sec": agent_times[1],
-                "agent_2_prior_yzt_sec": agent_times[2],
-                "agent_3_prior_xzt_sec": agent_times[3],
-                "iteration_total_sec": iteration_sec,
-            }
-
+            timing_row = dict(zip(
+                TIMING_FIELDS,
+                [itr + 1] + [agent_times[k] for k in range(4)] + [iteration_sec],
+            ))
             if timing_log_path is not None:
                 with open(timing_log_path, "a", newline="") as f:
-                    writer = csv.DictWriter(f, fieldnames=timing_row.keys())
-                    writer.writerow(timing_row)
-
+                    csv.DictWriter(f, fieldnames=TIMING_FIELDS).writerow(timing_row)
             if verbose:
                 print(
                     f"[MACE] Timing: itr={itr + 1}, "
-                    f"agent0={agent_times[0]:.2f}s, "
-                    f"agent1={agent_times[1]:.2f}s, "
-                    f"agent2={agent_times[2]:.2f}s, "
-                    f"agent3={agent_times[3]:.2f}s, "
-                    f"total={iteration_sec:.2f}s"
+                    + ", ".join(f"agent{k}={agent_times[k]:.2f}s" for k in range(4))
+                    + f", total={iteration_sec:.2f}s"
                 )
 
         if verbose:
@@ -387,104 +284,69 @@ class MACE4DModel:
         return sum(beta[k] * X[k] for k in range(4))
 
     # ------------------------------------------------------------------
-    # Serial implementation (single device)
+    # Agents and helpers
     # ------------------------------------------------------------------
 
-    def _recon_serial(self, init_image, init_save_dir):
-        nt = self.nt
-        sino_list = self.sino_list
-        weights_list = self.weights_list
-        models = self.model_list
-        beta = self.beta
-        sigma_p = self.sigma_p
-        verbose = self.verbose
+    def _run_forward_agent(self, W_k, X_prev, device):
+        """Agent 0: cone-beam prox_map, one time frame at a time, on one device."""
+        agent_t0 = time.time()
+        out = np.stack([
+            np.asarray(
+                self.model_list[t].prox_map(
+                    prox_input=jax.device_put(jnp.asarray(W_k[t]), device),
+                    sinogram=jax.device_put(jnp.asarray(self.sino_list[t]), device),
+                    sigma_prox=self.sigma_p,
+                    weights=jax.device_put(jnp.asarray(self.weights_list[t]), device),
+                    init_recon=jax.device_put(jnp.asarray(X_prev[t]), device),
+                    max_iterations=self.num_prox_iterations,
+                    stop_threshold_change_pct=self.stop_threshold,
+                )[0]
+            )
+            for t in range(self.nt)
+        ])
+        out = self._dejitter(out)
+        agent_sec = time.time() - agent_t0
+        if self.verbose:
+            print(f"[MACE]  Forward agent ran on {device} in {agent_sec:.2f} sec.")
+        return out, agent_sec
 
-        device = jax.devices()[0]
+    def _run_prior_agent(self, W_k, device, permute_vector, sigma_list, agent_name):
+        """Prior agent: qGGMRF denoising of one hyperplane orientation."""
+        agent_t0 = time.time()
+        out = denoiser_wrapper(self._dejitter(W_k), permute_vector=permute_vector,
+                               sigma_list=sigma_list, device=device)
+        agent_sec = time.time() - agent_t0
+        if self.verbose:
+            print(f"[MACE]  Prior agent {agent_name} ran on {device} in {agent_sec:.2f} sec.")
+        return out, agent_sec
 
-        if verbose:
-            print(f"[MACE] Start serial 4D reconstruction with {nt} time frames on {device}.")
+    def _dejitter(self, x):
+        """Apply the DCT-I temporal dejitter if enabled; otherwise return x unchanged."""
+        if not self.dejitter:
+            return x
+        return dejitter_4d_dct(x, period=self.dejitter_period, harmonics=True,
+                               band_width=1, dtype=np.float32,
+                               verbose=bool(self.verbose))
 
-        if init_image is None:
-            if verbose:
-                print("[MACE] Computing initial MBIR recon (serial)...")
-            t0 = time.time()
-            init_image = np.stack([
-                np.asarray(
-                    models[t].recon(
-                        jnp.asarray(sino_list[t]),
-                        weights=jnp.asarray(weights_list[t]),
-                        max_iterations=20,
-                        stop_threshold_change_pct=self.stop_threshold,
-                    )[0]
-                )
-                for t in range(nt)
-            ])
-            if init_save_dir is not None:
-                os.makedirs(init_save_dir, exist_ok=True)
-                np.save(os.path.join(init_save_dir, "init_image.npy"), init_image)
-            if verbose:
-                print(f"[MACE] Initialization done in {time.time() - t0:.2f} sec.")
-        else:
-            init_image = np.asarray(init_image)
-            if verbose:
-                print("[MACE] Using provided init_image.")
-
-        if verbose:
-            print("[MACE] Precomputing sigma lists...")
-        sigma_lists = [
-            estimate_sigma_per_hyperplane(np.transpose(init_image, perm), device=device)
-            for _, perm in PRIOR_ORIENTATIONS
-        ]
-        if verbose:
-            print("[MACE] Sigma precomputation done.")
-
-        W = [np.copy(init_image) for _ in range(4)]
-        X = [np.copy(init_image) for _ in range(4)]
-
-        for itr in range(self.max_mace_itr):
-            itr_t0 = time.time()
-            if verbose:
-                print(f"[MACE] Iteration {itr + 1}/{self.max_mace_itr}")
-
-            # Forward agent
-            X[0] = np.stack([
-                np.asarray(
-                    models[t].prox_map(
-                        prox_input=jnp.asarray(W[0][t]),
-                        sinogram=jnp.asarray(sino_list[t]),
-                        sigma_prox=sigma_p,
-                        weights=jnp.asarray(weights_list[t]),
-                        init_recon=jnp.asarray(X[0][t]),
-                        max_iterations=self.num_prox_iterations,
-                        stop_threshold_change_pct=self.stop_threshold,
-                    )[0]
-                )
-                for t in range(nt)
-            ])
-            if self.dejitter:
-                X[0] = dejitter_4d_dct(
-                    X[0], period=self.dejitter_period,
-                    harmonics=True, band_width=1, dtype=np.float32, verbose=bool(verbose),
-                )
-
-            # Prior agents
-            for k, (_, perm) in enumerate(PRIOR_ORIENTATIONS, start=1):
-                W_in = dejitter_4d_dct(
-                    W[k], period=self.dejitter_period, harmonics=True,
-                    band_width=1, dtype=np.float32, verbose=bool(verbose),
-                ) if self.dejitter else W[k]
-                X[k] = denoiser_wrapper(W_in, permute_vector=perm,
-                                        sigma_list=sigma_lists[k - 1], device=device)
-
-            # ADMM consensus
-            z = sum(beta[k] * (2.0 * X[k] - W[k]) for k in range(4))
-            for k in range(4):
-                W[k] = W[k] + 2.0 * self.rho * (z - X[k])
-
-            if verbose:
-                print(f"[MACE] Iteration {itr + 1} done in {time.time() - itr_t0:.2f} sec.")
-
-        if verbose:
-            print("[MACE] Reconstruction complete.")
-
-        return sum(beta[k] * X[k] for k in range(4))
+    def _compute_init_image(self, device, init_save_dir):
+        """Per-frame MBIR recon (15 iterations) used as the MACE initial image."""
+        if self.verbose:
+            print(f"[MACE] Computing initial MBIR recon on {device} (one frame at a time)...")
+        t0 = time.time()
+        init_image = np.stack([
+            np.asarray(
+                self.model_list[t].recon(
+                    jax.device_put(jnp.asarray(self.sino_list[t]), device),
+                    weights=jax.device_put(jnp.asarray(self.weights_list[t]), device),
+                    max_iterations=15,
+                    stop_threshold_change_pct=self.stop_threshold,
+                )[0]
+            )
+            for t in range(self.nt)
+        ])
+        if init_save_dir is not None:
+            os.makedirs(init_save_dir, exist_ok=True)
+            np.save(os.path.join(init_save_dir, "init_image.npy"), init_image)
+        if self.verbose:
+            print(f"[MACE] Initialization done in {time.time() - t0:.2f} sec.")
+        return init_image
