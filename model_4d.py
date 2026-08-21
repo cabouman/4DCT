@@ -207,7 +207,7 @@ class MACE4DModel:
                     models[t].recon(
                         jax.device_put(jnp.asarray(sino_list[t]), init_device),
                         weights=jax.device_put(jnp.asarray(weights_list[t]), init_device),
-                        max_iterations=20,
+                        max_iterations=15,
                         stop_threshold_change_pct=self.stop_threshold,
                     )[0]
                 )
