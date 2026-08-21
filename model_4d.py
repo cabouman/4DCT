@@ -50,7 +50,7 @@ class MACE4DModel:
         ADMM step size (Mann iteration parameter). Default 0.5.
     max_mace_itr : int
         Number of outer MACE iterations. Default 10.
-    forward_num_iterations : int
+    num_prox_iterations : int
         Max prox_map iterations per MACE step. Default 3.
     stop_threshold : float
         Convergence threshold passed to prox_map. Default 0.02.
@@ -58,12 +58,12 @@ class MACE4DModel:
         Sinogram weight type for mj.gen_weights. Default "transmission_root".
     sigma_p : float or None
         Proximal map sigma. None lets mbirjax choose automatically.
-    verbose : int
-        0 = silent, 1 = normal progress, 2 = debug.
     dejitter : bool
         Apply DCT-I temporal dejitter inside each agent. Default True.
     dejitter_period : int
         Jitter period in frames (frames per gating cycle). Default 6.
+    verbose : int
+        0 = silent, 1 = normal progress, 2 = debug.
     """
 
     def __init__(
@@ -73,13 +73,13 @@ class MACE4DModel:
         prior_weight=0.5,
         rho=0.5,
         max_mace_itr=10,
-        forward_num_iterations=3,
+        num_prox_iterations=3,
         stop_threshold=0.02,
         weight_type="transmission_root",
         sigma_p=None,
-        verbose=1,
         dejitter=True,
         dejitter_period=6,
+        verbose=1,
     ):
         if len(sino_list) != len(model_list):
             raise ValueError("sino_list and model_list must have the same length.")
@@ -89,7 +89,7 @@ class MACE4DModel:
         self.nt = len(sino_list)
         self.rho = rho
         self.max_mace_itr = max_mace_itr
-        self.forward_num_iterations = forward_num_iterations
+        self.num_prox_iterations = num_prox_iterations
         self.stop_threshold = stop_threshold
         self.sigma_p = sigma_p
         self.verbose = verbose
@@ -283,7 +283,7 @@ class MACE4DModel:
                         sigma_prox=sigma_p,
                         weights=jax.device_put(jnp.asarray(weights_list[t]), device),
                         init_recon=jax.device_put(jnp.asarray(X_prev[t]), device),
-                        max_iterations=self.forward_num_iterations,
+                        max_iterations=self.num_prox_iterations,
                         stop_threshold_change_pct=self.stop_threshold,
                     )[0]
                 )
@@ -481,7 +481,7 @@ class MACE4DModel:
                         sigma_prox=sigma_p,
                         weights=jnp.asarray(weights_list[t]),
                         init_recon=jnp.asarray(X[0][t]),
-                        max_iterations=self.forward_num_iterations,
+                        max_iterations=self.num_prox_iterations,
                         stop_threshold_change_pct=self.stop_threshold,
                     )[0]
                 )

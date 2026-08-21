@@ -22,8 +22,8 @@ Entry point for Lilly production runs. Launched via `bash test_script_4D.sh` or 
 | `--downsample_row` | `1` | Detector row subsampling factor; increase to trade resolution for speed |
 | `--downsample_column` | `1` | Detector column subsampling factor; increase to trade resolution for speed |
 | `--subsample_view_factor` | `1` | View subsampling factor; increase to use fewer projection angles |
-| `--angle_span_per_recon` | `120.0` | Degrees covered per time frame |
-| `--angle_advancing` | `60.0` | Degrees advanced per frame step (= span − overlap) |
+| `--angle_span_per_frame` | `120.0` | Degrees covered per time frame |
+| `--angle_stride` | `60.0` | Degrees advanced per frame step (= span − overlap) |
 | `--max_mace_itr` | `10` | Number of outer MACE iterations |
 | `--output_path` | `./output` | Output directory |
 | `--num_frames` | *(all frames)* | Reconstruct only the first N time frames |
@@ -37,11 +37,11 @@ Entry point for Lilly production runs. Launched via `bash test_script_4D.sh` or 
 
 | Parameter | Value | How it's set                                                                     |
 |---|---|----------------------------------------------------------------------------------|
-| `views_per_frame` | derived | `round(angle_span_per_recon / angle_step)` inside `construct_time_frames()`; angle_step comes from the model's view spacing |
-| `stride` | derived | `round(angle_advancing / angle_step)` inside `construct_time_frames()`           |
-| `dejitter_period` | derived | `round(360 / angle_advancing)` = 6 for 60° advance                               |
+| `views_per_frame` | derived | `round(angle_span_per_frame / angle_step)` inside `construct_time_frames()`; angle_step comes from the model's view spacing |
+| `stride` | derived | `round(angle_stride / angle_step)` inside `construct_time_frames()`              |
+| `dejitter_period` | derived | `round(2π / angle_stride)` = 6 for 60° stride                                    |
 
-`angle_span_per_recon` and `angle_advancing` are CLI flags (defaults 120° and 60°); see the table above.
+`angle_span_per_frame` and `angle_stride` are CLI flags in degrees (defaults 120° and 60°); internally all angles are radians.
 
 ### MACE algorithm
 
@@ -49,7 +49,7 @@ Entry point for Lilly production runs. Launched via `bash test_script_4D.sh` or 
 |---|---|---|
 | `prior_weight` | `0.5` | Weight split between forward agent (0.5) and three prior agents (0.5/3 each) |
 | `rho` | `0.5` | ADMM step size (Mann iteration parameter) |
-| `forward_num_iterations` | `3` | Max prox_map iterations per MACE step |
+| `num_prox_iterations` | `3` | Max prox_map iterations per MACE step |
 | `stop_threshold` | `0.02` | Prox_map convergence threshold (% change) |
 | `weight_type` | `"transmission_root"` | Sinogram weighting scheme (default in `MACE4DModel`) |
 | `sigma_p` | `None` | Proximal sigma — `None` lets mbirjax choose automatically |

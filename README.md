@@ -56,8 +56,8 @@ ct_model.set_params(sharpness=1.0, positivity_flag=True)
 
 # 2. Construct time frames
 sino_frames, model_frames = construct_time_frames(sino, ct_model,
-                                                  angle_span_per_recon=120.0,
-                                                  angle_advancing=60.0)
+                                                  angle_span_per_frame=np.radians(120.0),
+                                                  angle_stride=np.radians(60.0))
 
 # 3. Build model and reconstruct
 model_4d = MACE4DModel(sino_frames, model_frames, prior_weight=0.5, max_mace_itr=10)

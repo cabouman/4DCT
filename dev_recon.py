@@ -63,13 +63,14 @@ if __name__ == "__main__":
         subsample_view_factor=subsample_view_factor,
         auto_crop=sino_auto_cropping,
     )
-    ct_model.set_params(sharpness=sharpness, verbose=verbose, positivity_flag=True)
+    ct_model.set_params(sharpness=sharpness, positivity_flag=True, verbose=verbose)
 
     # ── Time frame construction ────────────────────────────────────────────────
-    angle_span_per_recon = 120.0   # degrees covered per time frame
-    angle_overlapping    = 60.0    # degrees of overlap between frames
-    angle_advancing = angle_span_per_recon - angle_overlapping  # degrees advanced per frame step
-    dejitter_period = int(round(360.0 / angle_advancing))  # period of the jitter introduced by sinogram gating
+    # Angles are in radians everywhere; degrees appear only as literals here.
+    angle_span_per_frame = np.radians(120.0)  # angular span covered per time frame
+    angle_overlap        = np.radians(60.0)   # overlap between consecutive frames
+    angle_stride = angle_span_per_frame - angle_overlap  # advance per frame step
+    dejitter_period = int(round(2.0 * np.pi / angle_stride))  # period of the jitter introduced by sinogram gating
 
     time_range = slice(0, -1)
 
@@ -77,8 +78,8 @@ if __name__ == "__main__":
     sino_frames, model_frames = construct_time_frames(
         sino=sino,
         model=ct_model,
-        angle_span_per_recon=angle_span_per_recon,
-        angle_advancing=angle_advancing,
+        angle_span_per_frame=angle_span_per_frame,
+        angle_stride=angle_stride,
     )
     sino_frames = sino_frames[time_range]
     model_frames = model_frames[time_range]
@@ -88,7 +89,7 @@ if __name__ == "__main__":
     prior_weight = 0.5          # float or 3-list [xyt_w, yzt_w, xzt_w]
     rho = 0.5                   # ADMM step size
     max_mace_itr = 10           # outer MACE iterations
-    forward_num_iterations = 3  # prox_map iterations per step
+    num_prox_iterations = 3     # prox_map iterations per step
     stop_threshold = 0.02       # prox_map convergence threshold
     sigma_p = None              # proximal sigma; None = auto
     dejitter = True             # DCT-I temporal dejitter inside agents
@@ -105,12 +106,12 @@ if __name__ == "__main__":
         prior_weight=prior_weight,
         rho=rho,
         max_mace_itr=max_mace_itr,
-        forward_num_iterations=forward_num_iterations,
+        num_prox_iterations=num_prox_iterations,
         stop_threshold=stop_threshold,
         sigma_p=sigma_p,
-        verbose=verbose,
         dejitter=dejitter,
         dejitter_period=dejitter_period,
+        verbose=verbose,
     )
 
     init_save_dir = os.path.join(output_path, "init")

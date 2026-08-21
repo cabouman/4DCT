@@ -18,8 +18,8 @@ mkdir -p ~/4dct_logs/
 python Lilly_recon.py \
   --data_path             "$DATA_PATH" \
   --output_path           "$OUTPUT_PATH" \
-  --angle_span_per_recon  120.0 \
-  --angle_advancing       60.0 \
+  --angle_span_per_frame  120.0 \
+  --angle_stride          60.0 \
   --max_mace_itr          10 \
   --num_frames            25 \
   --downsample_row        1 \

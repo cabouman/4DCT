@@ -57,11 +57,11 @@ if __name__ == "__main__":
         help="View subsampling factor.",
     )
     parser.add_argument(
-        "--angle_span_per_recon", type=float, default=120.0,
+        "--angle_span_per_frame", type=float, default=120.0,
         help="Angular span (degrees) covered by each time frame.",
     )
     parser.add_argument(
-        "--angle_advancing", type=float, default=60.0,
+        "--angle_stride", type=float, default=60.0,
         help="Degrees advanced per frame step (= span - overlap).",
     )
     parser.add_argument(
@@ -97,12 +97,13 @@ if __name__ == "__main__":
     sharpness = 1.0
     prior_weight = 0.5
     rho = 0.5
-    forward_num_iterations = 3
+    num_prox_iterations = 3
     stop_threshold = 0.02
     verbose = 1
-    angle_span_per_recon = args.angle_span_per_recon  # Angular span (degrees) covered by each time frame.
-    angle_advancing      = args.angle_advancing  # Degrees advanced per frame step.
-    dejitter_period = int(round(360.0 / angle_advancing))  # period of the jitter introduced by sinogram gating
+    # CLI angles arrive in degrees; all computation is in radians.
+    angle_span_per_frame = np.radians(args.angle_span_per_frame)
+    angle_stride         = np.radians(args.angle_stride)
+    dejitter_period = int(round(2.0 * np.pi / angle_stride))  # period of the jitter introduced by sinogram gating
 
     # ── Preprocessing ──────────────────────────────────────────────────────────
     print("\n************** NSI dataset preprocessing **************")
@@ -113,15 +114,15 @@ if __name__ == "__main__":
         subsample_view_factor=args.subsample_view_factor,
         auto_crop=True,
     )
-    ct_model.set_params(sharpness=sharpness, verbose=verbose, positivity_flag=True)
+    ct_model.set_params(sharpness=sharpness, positivity_flag=True, verbose=verbose)
 
     # ── Time frame construction ────────────────────────────────────────────────
     print("\n************** Construct time frames **************")
     sino_frames, model_frames = construct_time_frames(
         sino=sino,
         model=ct_model,
-        angle_span_per_recon=angle_span_per_recon,
-        angle_advancing=angle_advancing,
+        angle_span_per_frame=angle_span_per_frame,
+        angle_stride=angle_stride,
     )
     print(f"Total frames: {len(sino_frames)}")
     if args.num_frames is not None:
@@ -145,10 +146,10 @@ if __name__ == "__main__":
         prior_weight=prior_weight,
         rho=rho,
         max_mace_itr=args.max_mace_itr,
-        forward_num_iterations=forward_num_iterations,
+        num_prox_iterations=num_prox_iterations,
         stop_threshold=stop_threshold,
-        verbose=verbose,
         dejitter_period=dejitter_period,
+        verbose=verbose,
     )
 
     # ── Reconstruct ────────────────────────────────────────────────────────────

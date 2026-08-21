@@ -26,7 +26,7 @@ _THREAD_LOCAL = threading.local()
 # Time frame construction
 # ---------------------------------------------------------------------------
 
-def construct_time_frames(sino, model, angle_span_per_recon, angle_advancing):
+def construct_time_frames(sino, model, angle_span_per_frame, angle_stride):
     """
     Split a full sinogram into overlapping fixed-size time frames.
 
@@ -38,15 +38,15 @@ def construct_time_frames(sino, model, angle_span_per_recon, angle_advancing):
     sino : ndarray, shape (num_views, det_rows, det_cols)
     model : mbirjax.ConeBeamModel
         Fully-built model for the full scan.
-    angle_span_per_recon : float
-        Angular span (degrees) covered by each time frame.
-    angle_advancing : float
-        Degrees advanced per frame step.
+    angle_span_per_frame : float
+        Angular span (radians) covered by each time frame.
+    angle_stride : float
+        Radians advanced per frame step.
 
     Returns
     -------
     sino_frames : list of ndarray
-        Each covers angle_span_per_recon degrees of views. Trailing views that
+        Each covers angle_span_per_frame radians of views. Trailing views that
         cannot form a full frame are discarded.
     model_frames : list of mbirjax.ConeBeamModel
         Per-frame models built via mj.copy_ct_model.
@@ -59,15 +59,15 @@ def construct_time_frames(sino, model, angle_span_per_recon, angle_advancing):
     angle_step = float(np.median(np.abs(np.diff(angles))))
     if angle_step <= 0:
         raise ValueError("Model angles must have nonzero spacing.")
-    views_per_frame = int(round(np.radians(angle_span_per_recon) / angle_step))
-    stride          = int(round(np.radians(angle_advancing) / angle_step))
+    views_per_frame = int(round(angle_span_per_frame / angle_step))
+    stride          = int(round(angle_stride / angle_step))
 
     if views_per_frame <= 0:
-        raise ValueError("angle_span_per_recon must cover at least one view.")
+        raise ValueError("angle_span_per_frame must cover at least one view.")
     if stride <= 0:
-        raise ValueError("angle_advancing must cover at least one view.")
+        raise ValueError("angle_stride must cover at least one view.")
     if views_per_frame > num_views:
-        raise ValueError("angle_span_per_recon cannot exceed the full scan.")
+        raise ValueError("angle_span_per_frame cannot exceed the full scan.")
 
     sino_frames = []
     model_frames = []
