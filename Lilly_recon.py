@@ -31,7 +31,7 @@ import mbirjax.preprocess as mjp
 import numpy as np
 
 from model_4d import MACE4DModel
-from utils import truncate_sino_into_time_bins, compute_bin_params
+from utils import truncate_sino_into_time_bins, compute_bin_params, gen_gif_and_save
 
 if __name__ == "__main__":
 
@@ -152,3 +152,7 @@ if __name__ == "__main__":
     print(f"\n[INFO] Total wall time: {run_time_h:.2f} hours.")
     print(f"[INFO] Recon saved to: {os.path.abspath(out_path)}")
     print(f"[INFO] Timing log:     {os.path.abspath(timing_log_path)}")
+
+    gif_path = os.path.join(output_path, "recon_4d.gif")
+    gen_gif_and_save(recon_4d, gif_path)
+    print(f"[INFO] GIF saved to:   {os.path.abspath(gif_path)}")

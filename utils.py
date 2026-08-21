@@ -11,8 +11,10 @@ import glob
 import os
 import threading
 
+import imageio.v2 as imageio
 import jax
 import jax.numpy as jnp
+import matplotlib.pyplot as plt
 import mbirjax as mj
 import numpy as np
 from scipy.fft import dct, idct
@@ -336,3 +338,42 @@ def denoiser_wrapper(x, permute_vector, sigma_list, device):
     y_perm = qggmrf_hyperplane_denoise(x_perm, sigma_list=sigma_list, device=device)
     inv_perm = np.argsort(permute_vector)
     return np.transpose(y_perm, inv_perm)
+
+
+# ---------------------------------------------------------------------------
+# Visualization
+# ---------------------------------------------------------------------------
+
+def gen_gif_and_save(recon, gif_path, vmin=0, vmax=0.06, z_slice=None, duration=0.15):
+    """
+    Generate a GIF of a 4D reconstruction stepping through time frames.
+
+    Parameters
+    ----------
+    recon : ndarray, shape (T, Z, X, Y)
+    gif_path : str
+        Output path for the saved GIF.
+    vmin, vmax : float
+        Colormap range for imshow.
+    z_slice : int or None
+        Z index to display. Defaults to the middle slice.
+    duration : float
+        Duration per frame in seconds.
+    """
+    if z_slice is None:
+        z_slice = recon.shape[1] // 2
+
+    frames = []
+    for t in range(recon.shape[0]):
+        fig, ax = plt.subplots(1, 1, figsize=(6, 6))
+        ax.imshow(recon[t, z_slice, :, :], cmap='gray', vmin=vmin, vmax=vmax)
+        ax.set_title(f't={t}')
+        ax.axis('off')
+        fig.suptitle(f'z slice = {z_slice}, time frame = {t}', fontsize=14)
+        plt.tight_layout()
+        fig.canvas.draw()
+        frames.append(np.asarray(fig.canvas.buffer_rgba()))
+        plt.close(fig)
+
+    imageio.mimsave(gif_path, frames, duration=duration)
+    print(f"Saved GIF to: {gif_path}")
