@@ -73,8 +73,8 @@ if __name__ == "__main__":
         help="Directory for output files (recon, init_image, timing log).",
     )
     parser.add_argument(
-        "--resume", action="store_true",
-        help="Load a previously saved init_image from output_path/init/ if found.",
+        "--resume", type=str, default=None, metavar="INIT_PATH",
+        help="Path to a saved init_image.npy to skip per-bin initialization.",
     )
     args = parser.parse_args()
 
@@ -128,10 +128,11 @@ if __name__ == "__main__":
 
     # ── Init image (resume or fresh) ───────────────────────────────────────────
     init_image = None
-    init_image_path = os.path.join(init_save_dir, "init_image.npy")
-    if args.resume and os.path.isfile(init_image_path):
-        print(f"[INFO] Loading saved init_image from {init_image_path}")
-        init_image = np.load(init_image_path)
+    if args.resume is not None:
+        if not os.path.isfile(args.resume):
+            raise FileNotFoundError(f"--resume path does not exist: {args.resume}")
+        print(f"[INFO] Loading saved init_image from {args.resume}")
+        init_image = np.load(args.resume)
 
     # ── Build model ────────────────────────────────────────────────────────────
     print("\n************** Build 4D MACE model **************")
