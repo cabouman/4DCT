@@ -57,6 +57,14 @@ if __name__ == "__main__":
         help="View subsampling factor.",
     )
     parser.add_argument(
+        "--angle_span_per_recon", type=float, default=120.0,
+        help="Angular span (degrees) covered by each time bin.",
+    )
+    parser.add_argument(
+        "--angle_advancing", type=float, default=60.0,
+        help="Degrees advanced per bin step (= span - overlap).",
+    )
+    parser.add_argument(
         "--max_mace_itr", type=int, default=10,
         help="Maximum number of outer MACE iterations.",
     )
@@ -88,9 +96,8 @@ if __name__ == "__main__":
     forward_num_iterations = 3
     stop_threshold = 0.02
     verbose = 1
-    angle_span_per_recon = 120.0   # degrees covered per time bin
-    angle_overlapping    = 60.0    # degrees of overlap between bins
-    angle_advancing = angle_span_per_recon - angle_overlapping  # degrees advanced per bin step
+    angle_span_per_recon = args.angle_span_per_recon  # Angular span (degrees) covered by each time bin.
+    angle_advancing      = args.angle_advancing  # Degrees advanced per bin step.
     dejitter_period = int(round(360.0 / angle_advancing))  # period of the jitter introduced by sinogram gating
 
     views_per_bin, stride = compute_bin_params(args.data_path, angle_span_per_recon, angle_advancing)

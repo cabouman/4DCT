@@ -20,6 +20,8 @@ python Lilly_recon.py \
   --downsample_row        1 \
   --downsample_column     1 \
   --subsample_view_factor 1 \
+  --angle_span_per_recon  120.0 \
+  --angle_advancing       60.0 \
   --max_mace_itr          10 \
   --output_path           "$OUTPUT_PATH" \
   2>&1 | tee ~/4dct_logs/lilly_run.log
