@@ -2,6 +2,10 @@
 
 4D CT reconstruction using MACE with a cone-beam prox_map forward agent and three qGGMRF prior agents across XY-t, YZ-t, and XZ-t hyperplanes. Designed for the Eli Lilly 4DCT phantom dataset acquired on NSI hardware.
 
+## Dependencies
+
+Requires `mbirjax` plus `scipy`, `imageio`, and `matplotlib`.
+
 ## Quick Start (Lilly)
 
 Edit `DATA_PATH` in `demo_4d.sh` to point to your extracted NSI dataset, then:
@@ -28,7 +32,7 @@ On a second run with the same settings, the saved initialization in `output/init
 ├── plans/
 │   ├── refactor_plan.md  # design decisions and interface discussion
 │   └── lilly_interface.md # parameter reference for Lilly operators
-└── tmp/                  # setup helpers (install deps, download data)
+└── tests/                # fast CPU tests (python -m pytest tests/)
 ```
 
 The original serial and multi-GPU implementations (`4DMACE_serial/`, `4DMACE_multi_threads/`) were merged into `mace4d.py`; git history preserves them.

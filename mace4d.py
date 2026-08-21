@@ -22,13 +22,14 @@ import threading
 import time
 import warnings
 
-import imageio.v2 as imageio
 import jax
 import jax.numpy as jnp
-import matplotlib.pyplot as plt
 import mbirjax as mj
 import numpy as np
 from scipy.fft import dct, idct
+
+# MBIR iterations for the per-frame initialization recon.
+_INIT_MBIR_ITERATIONS = 15
 
 # Prior-agent hyperplane orientations. The permutation moves the hyperplane
 # axis first; recon axes are (t, x, y, z).
@@ -183,7 +184,8 @@ class MACE4DModel:
                 init_source = f"cached ({os.path.join(init_dir, 'init_image.npy')})"
             else:
                 init_image = self._compute_init_image(agent_devices[0], init_dir)
-                init_source = f"computed ({self.nt} frames, 15 MBIR iterations each)"
+                init_source = (f"computed ({self.nt} frames, "
+                               f"{_INIT_MBIR_ITERATIONS} MBIR iterations each)")
 
         sigma_lists = self._compute_sigma_lists(init_image, agent_devices)
 
@@ -209,18 +211,18 @@ class MACE4DModel:
             if verbose:
                 print(f"\n[MACE] ── Iteration {itr + 1}/{self.max_mace_itr} ──")
 
-            # Snapshot W so all agents see a consistent state this iteration.
-            W_snap = [np.copy(W[k]) for k in range(4)]
+            # Agents only read W; W is not written until the consensus update
+            # after every agent has finished, so no snapshot copy is needed.
             agent_times = {}
 
             if parallel:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
                     futures = {
-                        pool.submit(self._run_forward_agent, W_snap[0], X[0],
+                        pool.submit(self._run_forward_agent, W[0], X[0],
                                     agent_devices[0]): (0, "forward"),
                     }
                     for k, (name, perm) in enumerate(_PRIOR_ORIENTATIONS, start=1):
-                        fut = pool.submit(self._run_prior_agent, W_snap[k], agent_devices[k],
+                        fut = pool.submit(self._run_prior_agent, W[k], agent_devices[k],
                                           perm, sigma_lists[k - 1], name)
                         futures[fut] = (k, f"prior {name}")
                     for fut in concurrent.futures.as_completed(futures):
@@ -232,10 +234,10 @@ class MACE4DModel:
                                 f"at +{time.time() - itr_t0:.2f} sec."
                             )
             else:
-                X[0], agent_times[0] = self._run_forward_agent(W_snap[0], X[0], agent_devices[0])
+                X[0], agent_times[0] = self._run_forward_agent(W[0], X[0], agent_devices[0])
                 for k, (name, perm) in enumerate(_PRIOR_ORIENTATIONS, start=1):
                     X[k], agent_times[k] = self._run_prior_agent(
-                        W_snap[k], agent_devices[k], perm, sigma_lists[k - 1], name)
+                        W[k], agent_devices[k], perm, sigma_lists[k - 1], name)
 
             # ADMM consensus (CPU)
             z = sum(beta[k] * (2.0 * X[k] - W[k]) for k in range(4))
@@ -421,7 +423,7 @@ class MACE4DModel:
         return init_image
 
     def _compute_init_image(self, device, init_dir):
-        """Per-frame MBIR recon (15 iterations) used as the MACE initial image."""
+        """Per-frame MBIR recon used as the MACE initial image."""
         if self.verbose:
             print(f"[MACE] Computing initial MBIR recon on {device} (one frame at a time)...")
         t0 = time.time()
@@ -430,7 +432,7 @@ class MACE4DModel:
                 self.model_list[t].recon(
                     jax.device_put(jnp.asarray(self.sino_list[t]), device),
                     weights=jax.device_put(jnp.asarray(self.weights_list[t]), device),
-                    max_iterations=15,
+                    max_iterations=_INIT_MBIR_ITERATIONS,
                     stop_threshold_change_pct=self.stop_threshold,
                 )[0]
             )
@@ -737,6 +739,10 @@ def gen_gif_and_save(recon, gif_path, vmin=0, vmax=0.06, x_slice=None, duration=
     duration : float
         Duration per frame in seconds.
     """
+    # Imported here so the compute path does not require visualization packages.
+    import imageio.v2 as imageio
+    import matplotlib.pyplot as plt
+
     if x_slice is None:
         x_slice = recon.shape[1] // 2
 
