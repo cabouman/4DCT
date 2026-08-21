@@ -28,7 +28,7 @@ _THREAD_LOCAL = threading.local()
 # Bin parameter computation from nsipro
 # ---------------------------------------------------------------------------
 
-def compute_bin_params(data_path, angle_span_per_recon, angle_overlapping):
+def compute_bin_params(data_path, angle_span_per_recon, angle_advancing):
     """
     Compute views_per_bin and stride from the dataset's nsipro file.
 
@@ -38,8 +38,8 @@ def compute_bin_params(data_path, angle_span_per_recon, angle_overlapping):
         Path to the NSI dataset folder (must contain exactly one .nsipro file).
     angle_span_per_recon : float
         Angular span (degrees) covered by each time bin.
-    angle_overlapping : float
-        Angular overlap (degrees) between consecutive bins.
+    angle_advancing : float
+        Degrees advanced per bin step.
 
     Returns
     -------
@@ -61,7 +61,7 @@ def compute_bin_params(data_path, angle_span_per_recon, angle_overlapping):
     ))
 
     views_per_bin = int(round(angle_span_per_recon / angle_step))
-    stride        = int(round((angle_span_per_recon - angle_overlapping) / angle_step))
+    stride        = int(round(angle_advancing / angle_step))
     return views_per_bin, stride
 
 

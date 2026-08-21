@@ -93,7 +93,7 @@ if __name__ == "__main__":
     angle_advancing = angle_span_per_recon - angle_overlapping  # degrees advanced per bin step
     dejitter_period = int(round(360.0 / angle_advancing))  # period of the jitter introduced by sinogram gating
 
-    views_per_bin, stride = compute_bin_params(args.data_path, angle_span_per_recon, angle_overlapping)
+    views_per_bin, stride = compute_bin_params(args.data_path, angle_span_per_recon, angle_advancing)
 
     # ── Preprocessing ──────────────────────────────────────────────────────────
     print("\n************** NSI dataset preprocessing **************")
