@@ -45,8 +45,12 @@ if __name__ == "__main__":
         help="Path to the extracted NSI dataset directory.",
     )
     parser.add_argument(
-        "--downsample", type=int, default=1,
-        help="Detector subsampling factor (rows and channels).",
+        "--downsample_row", type=int, default=1,
+        help="Detector row subsampling factor.",
+    )
+    parser.add_argument(
+        "--downsample_column", type=int, default=1,
+        help="Detector column subsampling factor.",
     )
     parser.add_argument(
         "--subsample_view_factor", type=int, default=1,
@@ -86,14 +90,14 @@ if __name__ == "__main__":
     verbose = 1
     angle_span_per_recon = 120.0   # degrees covered per time bin
     angle_overlapping    = 60.0    # degrees of overlap between bins
-    angle_march = angle_span_per_recon - angle_overlapping  # degrees advanced per bin step
-    dejitter_period = int(round(360.0 / angle_march))  # period of the jitter introduced by sinogram gating
+    angle_advancing = angle_span_per_recon - angle_overlapping  # degrees advanced per bin step
+    dejitter_period = int(round(360.0 / angle_advancing))  # period of the jitter introduced by sinogram gating
 
     views_per_bin, stride = compute_bin_params(args.data_path, angle_span_per_recon, angle_overlapping)
 
     # ── Preprocessing ──────────────────────────────────────────────────────────
     print("\n************** NSI dataset preprocessing **************")
-    downsample_rate = [args.downsample, args.downsample]
+    downsample_rate = [args.downsample_row, args.downsample_column]
     sino, ct_model = mjp.nsi.get_sino_and_model(
         args.data_path,
         downsample_factor=downsample_rate,

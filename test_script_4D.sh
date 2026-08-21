@@ -17,7 +17,8 @@ mkdir -p ~/4dct_logs/
 
 python Lilly_recon.py \
   --data_path             "$DATA_PATH" \
-  --downsample            1 \
+  --downsample_row        1 \
+  --downsample_column     1 \
   --subsample_view_factor 1 \
   --max_mace_itr          10 \
   --output_path           "$OUTPUT_PATH" \
