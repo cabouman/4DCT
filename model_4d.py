@@ -15,6 +15,7 @@ import concurrent.futures
 import csv
 import os
 import time
+import warnings
 
 import jax
 import jax.numpy as jnp
@@ -128,7 +129,7 @@ class MACE4DModel:
         self,
         init_image=None,
         parallel=True,
-        init_save_dir=None,
+        init_dir=None,
         timing_log_path=None,
         device_indices=None,
     ):
@@ -138,13 +139,16 @@ class MACE4DModel:
         Parameters
         ----------
         init_image : ndarray or None
-            Initial 4D image, shape (nt, nx, ny, nz). If None, a per-frame
-            MBIR recon is computed automatically and saved to init_save_dir.
+            Initial 4D image, shape (nt, nx, ny, nz). A wrong shape raises
+            ValueError. If None, the initial image comes from init_dir (see
+            below) or is recomputed.
         parallel : bool
             True  → agents run concurrently, one GPU each (requires ≥4 GPUs).
             False → the same agents run sequentially on a single device.
-        init_save_dir : str or None
-            Directory where the computed init_image is saved as init_image.npy.
+        init_dir : str or None
+            Cache directory for the computed initial image (init_image.npy).
+            If it holds an image of the correct shape, that image is used;
+            otherwise the initialization is recomputed and saved there.
         timing_log_path : str or None
             CSV file for per-iteration agent timing.
         device_indices : list of int or None
@@ -164,12 +168,15 @@ class MACE4DModel:
             print(f"[MACE] Start 4D reconstruction with {nt} time frames.")
 
         # ── Initialization ─────────────────────────────────────────────────────
-        if init_image is None:
-            init_image = self._compute_init_image(agent_devices[0], init_save_dir)
-        else:
-            init_image = np.asarray(init_image)
+        if init_image is not None:
+            init_image = self._validate_init_image(init_image)
             if verbose:
                 print("[MACE] Using provided init_image.")
+        else:
+            if init_dir is not None:
+                init_image = self._load_cached_init(init_dir)
+            if init_image is None:
+                init_image = self._compute_init_image(agent_devices[0], init_dir)
 
         sigma_lists = self._compute_sigma_lists(init_image, agent_devices)
 
@@ -336,7 +343,39 @@ class MACE4DModel:
                                band_width=1, dtype=np.float32,
                                verbose=bool(self.verbose))
 
-    def _compute_init_image(self, device, init_save_dir):
+    def _expected_init_shape(self):
+        """Shape the initial image must have: (nt,) + per-frame recon shape."""
+        return (self.nt,) + tuple(self.model_list[0].get_params("recon_shape"))
+
+    def _validate_init_image(self, init_image):
+        """Return init_image as float32, or raise ValueError on a wrong shape."""
+        init_image = np.asarray(init_image, dtype=np.float32)
+        expected = self._expected_init_shape()
+        if init_image.shape != expected:
+            raise ValueError(
+                f"init_image shape {init_image.shape} does not match expected {expected}."
+            )
+        return init_image
+
+    def _load_cached_init(self, init_dir):
+        """Load init_image.npy from init_dir if present and valid; else return None.
+
+        A missing file is normal (first run) and silent. A file that cannot be
+        loaded or has the wrong shape produces a warning.
+        """
+        path = os.path.join(init_dir, "init_image.npy")
+        if not os.path.isfile(path):
+            return None
+        try:
+            init_image = self._validate_init_image(np.load(path))
+        except (ValueError, OSError) as e:
+            warnings.warn(f"init_dir has an invalid initialization image ({e}); recomputing.")
+            return None
+        if self.verbose:
+            print(f"[MACE] Using cached init from {path}.")
+        return init_image
+
+    def _compute_init_image(self, device, init_dir):
         """Per-frame MBIR recon (15 iterations) used as the MACE initial image."""
         if self.verbose:
             print(f"[MACE] Computing initial MBIR recon on {device} (one frame at a time)...")
@@ -352,9 +391,9 @@ class MACE4DModel:
             )
             for t in range(self.nt)
         ])
-        if init_save_dir is not None:
-            os.makedirs(init_save_dir, exist_ok=True)
-            np.save(os.path.join(init_save_dir, "init_image.npy"), init_image)
+        if init_dir is not None:
+            os.makedirs(init_dir, exist_ok=True)
+            np.save(os.path.join(init_dir, "init_image.npy"), init_image)
         if self.verbose:
             print(f"[MACE] Initialization done in {time.time() - t0:.2f} sec.")
         return init_image

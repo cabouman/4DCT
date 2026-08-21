@@ -27,7 +27,6 @@ Entry point for Lilly production runs. Launched via `bash test_script_4D.sh` or 
 | `--max_mace_itr` | `10` | Number of outer MACE iterations |
 | `--output_path` | `./output` | Output directory |
 | `--num_frames` | *(all frames)* | Reconstruct only the first N time frames |
-| `--resume` | *(off by default)* | Path to a previously saved `init_image.npy`; skips recomputing the initialization |
 
 ---
 
@@ -72,5 +71,5 @@ Entry point for Lilly production runs. Launched via `bash test_script_4D.sh` or 
 | File | Description |
 |---|---|
 | `recon_4d_<time>h.npy` | Final 4D reconstruction, shape `(nt, nx, ny, nz)` |
-| `init/init_image.npy` | Per-frame MBIR initialization (reused with `--resume`) |
+| `init/init_image.npy` | Per-frame MBIR initialization; reused automatically on re-runs when its shape matches |
 | `timing_log.csv` | Per-iteration wall time for each MACE agent |

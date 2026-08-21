@@ -25,5 +25,4 @@ python Lilly_recon.py \
   --downsample_row        1 \
   --downsample_column     1 \
   --subsample_view_factor 1 \
-  `# --resume /path/to/init_image.npy` \
   2>&1 | tee ~/4dct_logs/lilly_run.log

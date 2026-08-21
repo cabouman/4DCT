@@ -15,7 +15,7 @@ Output is written to `./output/`:
 - `init/init_image.npy` — per-frame MBIR initialization (saved for potential reuse)
 - `timing_log.csv` — per-iteration agent timing
 
-To skip re-initialization on a second run, add `--resume <path-to-init_image.npy>` to the python command in `test_script_4D.sh` (a commented placeholder is already there).
+On a second run with the same settings, the saved initialization in `output/init/` is detected and reused automatically; if its shape does not match the run, it is recomputed with a warning.
 
 ## Layout
 
@@ -61,7 +61,7 @@ sino_frames, model_frames = construct_time_frames(sino, ct_model,
 
 # 3. Build model and reconstruct
 model_4d = MACE4DModel(sino_frames, model_frames, prior_weight=0.5, max_mace_itr=10)
-recon_4d = model_4d.recon(parallel=True, init_save_dir="./output/init")
+recon_4d = model_4d.recon(parallel=True, init_dir="./output/init")
 ```
 
 ## Multi-GPU Architecture

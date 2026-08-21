@@ -76,10 +76,6 @@ if __name__ == "__main__":
         "--num_frames", type=int, default=None,
         help="Reconstruct only the first N time frames. Omit to use all frames.",
     )
-    parser.add_argument(
-        "--resume", type=str, default=None, metavar="INIT_PATH",
-        help="Path to a saved init_image.npy to skip per-frame initialization.",
-    )
     args = parser.parse_args()
 
     # ── Validate inputs ────────────────────────────────────────────────────────
@@ -90,7 +86,7 @@ if __name__ == "__main__":
 
     output_path = args.output_path
     os.makedirs(output_path, exist_ok=True)
-    init_save_dir = os.path.join(output_path, "init")
+    init_dir = os.path.join(output_path, "init")
     timing_log_path = os.path.join(output_path, "timing_log.csv")
 
     # ── Fixed algorithmic hyperparameters ──────────────────────────────────────
@@ -130,14 +126,6 @@ if __name__ == "__main__":
         model_frames = model_frames[:args.num_frames]
         print(f"Using first {len(sino_frames)} frames (--num_frames={args.num_frames}).")
 
-    # ── Init image (resume or fresh) ───────────────────────────────────────────
-    init_image = None
-    if args.resume is not None:
-        if not os.path.isfile(args.resume):
-            raise FileNotFoundError(f"--resume path does not exist: {args.resume}")
-        print(f"[INFO] Loading saved init_image from {args.resume}")
-        init_image = np.load(args.resume)
-
     # ── Build model ────────────────────────────────────────────────────────────
     print("\n************** Build 4D MACE model **************")
     model_4d = MACE4DModel(
@@ -156,9 +144,8 @@ if __name__ == "__main__":
     print("\n************** Run 4D MACE reconstruction **************")
     time0 = time.time()
     recon_4d = model_4d.recon(
-        init_image=init_image,
         parallel=True,
-        init_save_dir=init_save_dir,
+        init_dir=init_dir,
         timing_log_path=timing_log_path,
     )
     run_time_h = (time.time() - time0) / 3600

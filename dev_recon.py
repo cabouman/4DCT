@@ -2,9 +2,9 @@
 4D MACE CT Reconstruction — development / exploration script.
 
 Edit the parameter blocks below before each run. Unlike Lilly_recon.py, all
-hyperparameters are directly accessible as Python variables. Toggle
-USE_SAVED_INIT_IMAGE to skip the slow per-frame initialization step on
-repeated runs against the same dataset.
+hyperparameters are directly accessible as Python variables. The per-frame
+initialization is cached in output/init/ and reused automatically when its
+shape matches the run.
 """
 
 import os
@@ -34,16 +34,6 @@ if __name__ == "__main__":
     os.makedirs(output_path, exist_ok=True)
     download_dir = "./data"
     os.makedirs(download_dir, exist_ok=True)
-
-    # ── Init image ─────────────────────────────────────────────────────────────
-    # Set to True to reuse a previously saved init (fast for repeated runs).
-    # The expected path is output_path/init/init_image.npy.
-    USE_SAVED_INIT_IMAGE = False
-    if USE_SAVED_INIT_IMAGE:
-        init_image_path = os.path.join(output_path, "init", "init_image.npy")
-        init_image = np.load(init_image_path)
-    else:
-        init_image = None
 
     # ── Dataset ────────────────────────────────────────────────────────────────
     dataset_url = "/depot/bouman/data/Lilly/4DCT/Phantom_30s_Run1_Dec2024.tgz"
@@ -114,16 +104,15 @@ if __name__ == "__main__":
         verbose=verbose,
     )
 
-    init_save_dir = os.path.join(output_path, "init")
+    init_dir = os.path.join(output_path, "init")
     timing_log_path = os.path.join(output_path, "timing_log.csv")
 
     # ── Reconstruct ────────────────────────────────────────────────────────────
     print("\n************** Run 4D MACE reconstruction **************")
     time0 = time.time()
     recon_4d = model_4d.recon(
-        init_image=init_image,
         parallel=parallel,
-        init_save_dir=init_save_dir,
+        init_dir=init_dir,
         timing_log_path=timing_log_path,
         device_indices=device_indices,
     )
