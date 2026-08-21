@@ -7,8 +7,6 @@ device per agent) contexts.
 """
 from __future__ import annotations
 
-import glob
-import os
 import threading
 
 import imageio.v2 as imageio
@@ -25,17 +23,21 @@ _THREAD_LOCAL = threading.local()
 
 
 # ---------------------------------------------------------------------------
-# Frame parameter computation from nsipro
+# Time frame construction
 # ---------------------------------------------------------------------------
 
-def compute_frame_params(data_path, angle_span_per_recon, angle_advancing):
+def construct_time_frames(sino, model, angle_span_per_recon, angle_advancing):
     """
-    Compute views_per_frame and stride from the dataset's nsipro file.
+    Split a full sinogram into overlapping fixed-size time frames.
+
+    The number of views per frame and the stride between frames are derived
+    from the model's angle spacing, so they stay correct under view subsampling.
 
     Parameters
     ----------
-    data_path : str
-        Path to the NSI dataset folder (must contain exactly one .nsipro file).
+    sino : ndarray, shape (num_views, det_rows, det_cols)
+    model : mbirjax.ConeBeamModel
+        Fully-built model for the full scan.
     angle_span_per_recon : float
         Angular span (degrees) covered by each time frame.
     angle_advancing : float
@@ -43,51 +45,9 @@ def compute_frame_params(data_path, angle_span_per_recon, angle_advancing):
 
     Returns
     -------
-    views_per_frame : int
-    stride : int
-    """
-    nsipro_files = glob.glob(os.path.join(data_path, '*.nsipro'))
-    assert len(nsipro_files) == 1, \
-        f"Expected 1 .nsipro file in {data_path}, found {len(nsipro_files)}"
-
-    with open(nsipro_files[0]) as f:
-        lines = f.readlines()
-
-    start = next(i for i, l in enumerate(lines) if '<Object Radiograph>' in l)
-    end   = next(i for i, l in enumerate(lines) if '</Object Radiograph>' in l)
-    angle_step = float(next(
-        l.split('<angleStep>')[1].strip()
-        for l in lines[start:end] if '<angleStep>' in l
-    ))
-
-    views_per_frame = int(round(angle_span_per_recon / angle_step))
-    stride          = int(round(angle_advancing / angle_step))
-    return views_per_frame, stride
-
-
-# ---------------------------------------------------------------------------
-# Sinogram splitting
-# ---------------------------------------------------------------------------
-
-def construct_time_frames(sino, model, views_per_frame, stride):
-    """
-    Split a full sinogram into overlapping fixed-size time frames.
-
-    Parameters
-    ----------
-    sino : ndarray, shape (num_views, det_rows, det_cols)
-    model : mbirjax.ConeBeamModel
-        Fully-built model for the full scan.
-    views_per_frame : int
-        Number of views in each frame.
-    stride : int
-        Step size (in views) between consecutive frames.
-
-    Returns
-    -------
     sino_frames : list of ndarray
-        Each has exactly `views_per_frame` views. Trailing views that cannot
-        form a full frame are discarded.
+        Each covers angle_span_per_recon degrees of views. Trailing views that
+        cannot form a full frame are discarded.
     model_frames : list of mbirjax.ConeBeamModel
         Per-frame models built via mj.copy_ct_model.
     """
@@ -95,12 +55,19 @@ def construct_time_frames(sino, model, views_per_frame, stride):
     angles = required_params["angles"]
     num_views = sino.shape[0]
 
+    # Angle step in radians from the model's actual view spacing.
+    angle_step = float(np.median(np.abs(np.diff(angles))))
+    if angle_step <= 0:
+        raise ValueError("Model angles must have nonzero spacing.")
+    views_per_frame = int(round(np.radians(angle_span_per_recon) / angle_step))
+    stride          = int(round(np.radians(angle_advancing) / angle_step))
+
     if views_per_frame <= 0:
-        raise ValueError("views_per_frame must be a positive integer.")
+        raise ValueError("angle_span_per_recon must cover at least one view.")
     if stride <= 0:
-        raise ValueError("stride must be a positive integer.")
+        raise ValueError("angle_advancing must cover at least one view.")
     if views_per_frame > num_views:
-        raise ValueError("views_per_frame cannot exceed total number of views.")
+        raise ValueError("angle_span_per_recon cannot exceed the full scan.")
 
     sino_frames = []
     model_frames = []

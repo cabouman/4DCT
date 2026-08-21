@@ -25,7 +25,7 @@ import mbirjax.preprocess as mjp
 import numpy as np
 
 from model_4d import MACE4DModel
-from utils import construct_time_frames, compute_frame_params, gen_gif_and_save
+from utils import construct_time_frames, gen_gif_and_save
 
 if __name__ == "__main__":
 
@@ -71,16 +71,14 @@ if __name__ == "__main__":
     angle_advancing = angle_span_per_recon - angle_overlapping  # degrees advanced per frame step
     dejitter_period = int(round(360.0 / angle_advancing))  # period of the jitter introduced by sinogram gating
 
-    views_per_frame, stride = compute_frame_params(dataset_dir, angle_span_per_recon, angle_advancing)
-
     time_range = slice(0, -1)
 
     print("\n************** Construct time frames **************")
     sino_frames, model_frames = construct_time_frames(
         sino=sino,
         model=ct_model,
-        views_per_frame=views_per_frame,
-        stride=stride,
+        angle_span_per_recon=angle_span_per_recon,
+        angle_advancing=angle_advancing,
     )
     sino_frames = sino_frames[time_range]
     model_frames = model_frames[time_range]

@@ -33,12 +33,12 @@ Entry point for Lilly production runs. Launched via `bash test_script_4D.sh` or 
 
 ## Parameters fixed by us (not exposed to Lilly)
 
-### Scan geometry — derived automatically from the `.nsipro` file
+### Scan geometry — derived automatically
 
 | Parameter | Value | How it's set                                                                     |
 |---|---|----------------------------------------------------------------------------------|
-| `views_per_frame` | derived | `round(angle_span_per_recon / angle_step)` via `compute_frame_params()`          |
-| `stride` | derived | `round(angle_advancing / angle_step)` via `compute_frame_params()`               |
+| `views_per_frame` | derived | `round(angle_span_per_recon / angle_step)` inside `construct_time_frames()`; angle_step comes from the model's view spacing |
+| `stride` | derived | `round(angle_advancing / angle_step)` inside `construct_time_frames()`           |
 | `dejitter_period` | derived | `round(360 / angle_advancing)` = 6 for 60° advance                               |
 
 `angle_span_per_recon` and `angle_advancing` are CLI flags (defaults 120° and 60°); see the table above.
