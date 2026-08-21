@@ -105,7 +105,7 @@ if __name__ == "__main__":
     )
 
     init_dir = os.path.join(output_path, "init")
-    timing_log_path = os.path.join(output_path, "timing_log.csv")
+    log_dir = os.path.join(output_path, "logs")
 
     # ── Reconstruct ────────────────────────────────────────────────────────────
     print("\n************** Run 4D MACE reconstruction **************")
@@ -113,7 +113,7 @@ if __name__ == "__main__":
     recon_4d = model_4d.recon(
         parallel=parallel,
         init_dir=init_dir,
-        timing_log_path=timing_log_path,
+        log_dir=log_dir,
         device_indices=device_indices,
     )
     run_time_h = (time.time() - time0) / 3600
@@ -122,6 +122,17 @@ if __name__ == "__main__":
     np.save(out_path, recon_4d)
     print(f"\n[MACE] Total wall time: {run_time_h:.2f} hours.")
     print(f"[MACE] Recon saved to:  {os.path.abspath(out_path)}")
+
+    with open(os.path.join(log_dir, "run_info.txt"), "a") as f:
+        f.write("\n# Script settings (dev_recon.py)\n")
+        f.write(f"dataset              = {dataset_dir}\n")
+        f.write(f"downsample (row, col) = ({downsample_rate[0]}, {downsample_rate[1]})\n")
+        f.write(f"subsample_view_factor = {subsample_view_factor}\n")
+        f.write(f"angle span / stride  = {np.degrees(angle_span_per_frame):.1f} deg / {np.degrees(angle_stride):.1f} deg\n")
+        f.write(f"num_frames           = {len(sino_frames)}\n")
+        f.write(f"sharpness            = {sharpness}\n")
+        f.write(f"total wall time      = {run_time_h:.2f} h\n")
+        f.write(f"recon saved to       = {os.path.abspath(out_path)}\n")
 
     gif_path = os.path.join(output_path, "recon_4d.gif")
     gen_gif_and_save(recon_4d, gif_path)

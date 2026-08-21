@@ -13,7 +13,8 @@ bash test_script_4D.sh
 Output is written to `./output/`:
 - `recon_4d_<time>h.npy` — reconstructed 4D volume, shape `(nt, nx, ny, nz)`
 - `init/init_image.npy` — per-frame MBIR initialization (saved for potential reuse)
-- `timing_log.csv` — per-iteration agent timing
+- `logs/run_info.txt` — human-readable summary of all run settings
+- `logs/timing_log.csv` — per-iteration agent timing and consensus change
 
 On a second run with the same settings, the saved initialization in `output/init/` is detected and reused automatically; if its shape does not match the run, it is recomputed with a warning.
 
@@ -89,9 +90,12 @@ This is controlled by `dejitter=True` (default) and `dejitter_period=6` on `MACE
 
 ## Timing Log
 
-`model.recon(parallel=True, timing_log_path="./output/timing_log.csv")` writes a CSV with columns:
+`model.recon(parallel=True, log_dir="./output/logs")` writes two files. `run_info.txt` is a human-readable summary of the run settings (the model writes its section; the calling script appends dataset and preprocessing settings). `timing_log.csv` has one row per MACE iteration:
 
 ```
 iteration, agent_0_forward_sec, agent_1_prior_xyt_sec,
-agent_2_prior_yzt_sec, agent_3_prior_xzt_sec, iteration_total_sec
+agent_2_prior_yzt_sec, agent_3_prior_xzt_sec, iteration_total_sec,
+consensus_change_pct
 ```
+
+`consensus_change_pct` is the relative change of the consensus average between iterations, the convergence measure. With `log_dir=None` (the default) no log files are written.

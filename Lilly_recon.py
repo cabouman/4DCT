@@ -87,7 +87,7 @@ if __name__ == "__main__":
     output_path = args.output_path
     os.makedirs(output_path, exist_ok=True)
     init_dir = os.path.join(output_path, "init")
-    timing_log_path = os.path.join(output_path, "timing_log.csv")
+    log_dir = os.path.join(output_path, "logs")
 
     # ── Fixed algorithmic hyperparameters ──────────────────────────────────────
     sharpness = 1.0
@@ -146,7 +146,7 @@ if __name__ == "__main__":
     recon_4d = model_4d.recon(
         parallel=True,
         init_dir=init_dir,
-        timing_log_path=timing_log_path,
+        log_dir=log_dir,
     )
     run_time_h = (time.time() - time0) / 3600
 
@@ -154,7 +154,18 @@ if __name__ == "__main__":
     np.save(out_path, recon_4d)
     print(f"\n[INFO] Total wall time: {run_time_h:.2f} hours.")
     print(f"[INFO] Recon saved to: {os.path.abspath(out_path)}")
-    print(f"[INFO] Timing log:     {os.path.abspath(timing_log_path)}")
+    print(f"[INFO] Logs:           {os.path.abspath(log_dir)}")
+
+    with open(os.path.join(log_dir, "run_info.txt"), "a") as f:
+        f.write("\n# Script settings (Lilly_recon.py)\n")
+        f.write(f"data_path            = {args.data_path}\n")
+        f.write(f"downsample (row, col) = ({args.downsample_row}, {args.downsample_column})\n")
+        f.write(f"subsample_view_factor = {args.subsample_view_factor}\n")
+        f.write(f"angle span / stride  = {args.angle_span_per_frame} deg / {args.angle_stride} deg\n")
+        f.write(f"num_frames           = {len(sino_frames)}\n")
+        f.write(f"sharpness            = {sharpness}\n")
+        f.write(f"total wall time      = {run_time_h:.2f} h\n")
+        f.write(f"recon saved to       = {os.path.abspath(out_path)}\n")
 
     gif_path = os.path.join(output_path, "recon_4d.gif")
     gen_gif_and_save(recon_4d, gif_path)

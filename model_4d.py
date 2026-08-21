@@ -44,6 +44,7 @@ TIMING_FIELDS = [
     "agent_2_prior_yzt_sec",
     "agent_3_prior_xzt_sec",
     "iteration_total_sec",
+    "consensus_change_pct",
 ]
 
 
@@ -130,7 +131,7 @@ class MACE4DModel:
         init_image=None,
         parallel=True,
         init_dir=None,
-        timing_log_path=None,
+        log_dir=None,
         device_indices=None,
     ):
         """
@@ -149,8 +150,9 @@ class MACE4DModel:
             Cache directory for the computed initial image (init_image.npy).
             If it holds an image of the correct shape, that image is used;
             otherwise the initialization is recomputed and saved there.
-        timing_log_path : str or None
-            CSV file for per-iteration agent timing.
+        log_dir : str or None
+            Directory for log files (run_info.txt, timing_log.csv). Created if
+            needed. None writes no log files.
         device_indices : list of int or None
             GPU indices for [forward, prior_xyt, prior_yzt, prior_xzt] in
             parallel mode. Default: [0, 1, 2, 3].
@@ -170,13 +172,17 @@ class MACE4DModel:
         # ── Initialization ─────────────────────────────────────────────────────
         if init_image is not None:
             init_image = self._validate_init_image(init_image)
+            init_source = "provided by caller"
             if verbose:
                 print("[MACE] Using provided init_image.")
         else:
             if init_dir is not None:
                 init_image = self._load_cached_init(init_dir)
-            if init_image is None:
+            if init_image is not None:
+                init_source = f"cached ({os.path.join(init_dir, 'init_image.npy')})"
+            else:
                 init_image = self._compute_init_image(agent_devices[0], init_dir)
+                init_source = f"computed ({self.nt} frames, 15 MBIR iterations each)"
 
         sigma_lists = self._compute_sigma_lists(init_image, agent_devices)
 
@@ -184,15 +190,19 @@ class MACE4DModel:
         W = [np.copy(init_image) for _ in range(4)]
         X = [np.copy(init_image) for _ in range(4)]
 
-        # ── Timing log ─────────────────────────────────────────────────────────
-        if timing_log_path is not None:
-            timing_log_dir = os.path.dirname(timing_log_path)
-            if timing_log_dir:
-                os.makedirs(timing_log_dir, exist_ok=True)
+        # ── Log files ──────────────────────────────────────────────────────────
+        timing_log_path = None
+        if log_dir is not None:
+            os.makedirs(log_dir, exist_ok=True)
+            self._write_run_info(log_dir, parallel, agent_devices, init_source)
+            timing_log_path = os.path.join(log_dir, "timing_log.csv")
             with open(timing_log_path, "w", newline="") as f:
                 csv.DictWriter(f, fieldnames=TIMING_FIELDS).writeheader()
 
         # ── Main MACE loop ─────────────────────────────────────────────────────
+        # xbar is the consensus average sum(beta[k] X[k]); its relative change
+        # per iteration is the convergence measure logged in timing_log.csv.
+        xbar = init_image
         for itr in range(self.max_mace_itr):
             itr_t0 = time.time()
             if verbose:
@@ -231,10 +241,14 @@ class MACE4DModel:
             for k in range(4):
                 W[k] = W[k] + 2.0 * self.rho * (z - X[k])
 
+            xbar_prev, xbar = xbar, sum(beta[k] * X[k] for k in range(4))
+            denom = np.linalg.norm(xbar_prev)
+            change_pct = 100.0 * np.linalg.norm(xbar - xbar_prev) / denom if denom > 0 else np.inf
+
             iteration_sec = time.time() - itr_t0
             timing_row = dict(zip(
                 TIMING_FIELDS,
-                [itr + 1] + [agent_times[k] for k in range(4)] + [iteration_sec],
+                [itr + 1] + [agent_times[k] for k in range(4)] + [iteration_sec, change_pct],
             ))
             if timing_log_path is not None:
                 with open(timing_log_path, "a", newline="") as f:
@@ -243,13 +257,13 @@ class MACE4DModel:
                 print(
                     f"[MACE] Timing: itr={itr + 1}, "
                     + ", ".join(f"agent{k}={agent_times[k]:.2f}s" for k in range(4))
-                    + f", total={iteration_sec:.2f}s"
+                    + f", total={iteration_sec:.2f}s, change={change_pct:.4f}%"
                 )
 
         if verbose:
             print("\n[MACE] Reconstruction complete.")
 
-        return sum(beta[k] * X[k] for k in range(4))
+        return xbar
 
     # ------------------------------------------------------------------
     # Agents and helpers
@@ -342,6 +356,36 @@ class MACE4DModel:
         return dejitter_4d_dct(x, period=self.dejitter_period, harmonics=True,
                                band_width=1, dtype=np.float32,
                                verbose=bool(self.verbose))
+
+    def _write_run_info(self, log_dir, parallel, agent_devices, init_source):
+        """Write a human-readable summary of the run settings to run_info.txt."""
+        try:
+            from importlib.metadata import version
+            mbirjax_version = version("mbirjax")
+        except Exception:
+            mbirjax_version = "unknown"
+        if parallel:
+            mode = "parallel, agents on " + ", ".join(str(d) for d in agent_devices)
+        else:
+            mode = f"serial on {agent_devices[0]}"
+        lines = [
+            "# MACE4DModel run settings",
+            f"date                 = {time.strftime('%Y-%m-%d %H:%M:%S')}",
+            f"mbirjax version      = {mbirjax_version}",
+            f"time frames (nt)     = {self.nt}",
+            f"frame shape          = {tuple(self._expected_init_shape()[1:])}",
+            f"mode                 = {mode}",
+            f"init source          = {init_source}",
+            f"beta [fwd, xyt, yzt, xzt] = {[round(float(b), 4) for b in self.beta]}",
+            f"rho                  = {self.rho}",
+            f"max_mace_itr         = {self.max_mace_itr}",
+            f"num_prox_iterations  = {self.num_prox_iterations}",
+            f"stop_threshold       = {self.stop_threshold}",
+            f"sigma_p              = {'auto' if self.sigma_p is None else self.sigma_p}",
+            f"dejitter             = {self.dejitter}, period {self.dejitter_period}",
+        ]
+        with open(os.path.join(log_dir, "run_info.txt"), "w") as f:
+            f.write("\n".join(lines) + "\n")
 
     def _expected_init_shape(self):
         """Shape the initial image must have: (nt,) + per-frame recon shape."""

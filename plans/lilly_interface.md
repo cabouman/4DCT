@@ -72,4 +72,5 @@ Entry point for Lilly production runs. Launched via `bash test_script_4D.sh` or 
 |---|---|
 | `recon_4d_<time>h.npy` | Final 4D reconstruction, shape `(nt, nx, ny, nz)` |
 | `init/init_image.npy` | Per-frame MBIR initialization; reused automatically on re-runs when its shape matches |
-| `timing_log.csv` | Per-iteration wall time for each MACE agent |
+| `logs/run_info.txt` | Human-readable summary of all run settings |
+| `logs/timing_log.csv` | Per-iteration agent wall times and consensus change (%) |
