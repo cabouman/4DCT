@@ -1,5 +1,9 @@
 """
-4D MACE reconstruction model.
+4D MACE reconstruction — model and supporting utilities.
+
+This module is one self-contained functional block (intended for a later merge
+into mbirjax): the MACE4DModel class plus the helpers it uses for time-frame
+construction, DCT-I temporal dejitter, hyperplane denoising, and visualization.
 
 MACE4DModel runs the 4-agent MACE algorithm (one cone-beam prox_map agent +
 three qGGMRF prior agents across XY-t, YZ-t, XZ-t hyperplanes) behind a single
@@ -14,30 +18,27 @@ from __future__ import annotations
 import concurrent.futures
 import csv
 import os
+import threading
 import time
 import warnings
 
+import imageio.v2 as imageio
 import jax
 import jax.numpy as jnp
+import matplotlib.pyplot as plt
 import mbirjax as mj
 import numpy as np
-
-from utils import (
-    denoiser_wrapper,
-    dejitter_4d_dct,
-    estimate_sigma_per_hyperplane,
-    normalize_prior_weights,
-)
+from scipy.fft import dct, idct
 
 # Prior-agent hyperplane orientations. The permutation moves the hyperplane
 # axis first; recon axes are (t, x, y, z).
-PRIOR_ORIENTATIONS = [
+_PRIOR_ORIENTATIONS = [
     ("XY-t", (3, 0, 1, 2)),  # nz hyperplanes of shape (nt, nx, ny)
     ("YZ-t", (1, 0, 2, 3)),  # nx hyperplanes of shape (nt, ny, nz)
     ("XZ-t", (2, 0, 1, 3)),  # ny hyperplanes of shape (nt, nx, nz)
 ]
 
-TIMING_FIELDS = [
+_TIMING_FIELDS = [
     "iteration",
     "agent_0_forward_sec",
     "agent_1_prior_xyt_sec",
@@ -111,7 +112,7 @@ class MACE4DModel:
         self.verbose = verbose
         self.dejitter = dejitter
         self.dejitter_period = dejitter_period
-        self.beta = normalize_prior_weights(prior_weight)
+        self.beta = _normalize_prior_weights(prior_weight)
 
         if verbose:
             print(f"[MACE4D] Building weights for {self.nt} time frames...")
@@ -197,7 +198,7 @@ class MACE4DModel:
             self._write_run_info(log_dir, parallel, agent_devices, init_source)
             timing_log_path = os.path.join(log_dir, "timing_log.csv")
             with open(timing_log_path, "w", newline="") as f:
-                csv.DictWriter(f, fieldnames=TIMING_FIELDS).writeheader()
+                csv.DictWriter(f, fieldnames=_TIMING_FIELDS).writeheader()
 
         # ── Main MACE loop ─────────────────────────────────────────────────────
         # xbar is the consensus average sum(beta[k] X[k]); its relative change
@@ -218,7 +219,7 @@ class MACE4DModel:
                         pool.submit(self._run_forward_agent, W_snap[0], X[0],
                                     agent_devices[0]): (0, "forward"),
                     }
-                    for k, (name, perm) in enumerate(PRIOR_ORIENTATIONS, start=1):
+                    for k, (name, perm) in enumerate(_PRIOR_ORIENTATIONS, start=1):
                         fut = pool.submit(self._run_prior_agent, W_snap[k], agent_devices[k],
                                           perm, sigma_lists[k - 1], name)
                         futures[fut] = (k, f"prior {name}")
@@ -232,7 +233,7 @@ class MACE4DModel:
                             )
             else:
                 X[0], agent_times[0] = self._run_forward_agent(W_snap[0], X[0], agent_devices[0])
-                for k, (name, perm) in enumerate(PRIOR_ORIENTATIONS, start=1):
+                for k, (name, perm) in enumerate(_PRIOR_ORIENTATIONS, start=1):
                     X[k], agent_times[k] = self._run_prior_agent(
                         W_snap[k], agent_devices[k], perm, sigma_lists[k - 1], name)
 
@@ -247,12 +248,12 @@ class MACE4DModel:
 
             iteration_sec = time.time() - itr_t0
             timing_row = dict(zip(
-                TIMING_FIELDS,
+                _TIMING_FIELDS,
                 [itr + 1] + [agent_times[k] for k in range(4)] + [iteration_sec, change_pct],
             ))
             if timing_log_path is not None:
                 with open(timing_log_path, "a", newline="") as f:
-                    csv.DictWriter(f, fieldnames=TIMING_FIELDS).writerow(timing_row)
+                    csv.DictWriter(f, fieldnames=_TIMING_FIELDS).writerow(timing_row)
             if verbose:
                 print(
                     f"[MACE] Timing: itr={itr + 1}, "
@@ -302,15 +303,15 @@ class MACE4DModel:
         if self.verbose:
             print("[MACE] Precomputing sigma lists...")
         sigma_lists = [
-            estimate_sigma_per_hyperplane(
+            _estimate_sigma_per_hyperplane(
                 np.transpose(init_image, perm), device=agent_devices[k + 1]
             )
-            for k, (_, perm) in enumerate(PRIOR_ORIENTATIONS)
+            for k, (_, perm) in enumerate(_PRIOR_ORIENTATIONS)
         ]
         if self.verbose:
             counts = ", ".join(
                 f"{name}={np.count_nonzero(s > 1e-6)}/{s.size}"
-                for (name, _), s in zip(PRIOR_ORIENTATIONS, sigma_lists)
+                for (name, _), s in zip(_PRIOR_ORIENTATIONS, sigma_lists)
             )
             print(f"[MACE] Nonzero sigma counts: {counts}")
             print("[MACE] Sigma precomputation done.")
@@ -342,7 +343,7 @@ class MACE4DModel:
     def _run_prior_agent(self, W_k, device, permute_vector, sigma_list, agent_name):
         """Prior agent: qGGMRF denoising of one hyperplane orientation."""
         agent_t0 = time.time()
-        out = denoiser_wrapper(self._dejitter(W_k), permute_vector=permute_vector,
+        out = _denoiser_wrapper(self._dejitter(W_k), permute_vector=permute_vector,
                                sigma_list=sigma_list, device=device)
         agent_sec = time.time() - agent_t0
         if self.verbose:
@@ -353,7 +354,7 @@ class MACE4DModel:
         """Apply the DCT-I temporal dejitter if enabled; otherwise return x unchanged."""
         if not self.dejitter:
             return x
-        return dejitter_4d_dct(x, period=self.dejitter_period, harmonics=True,
+        return _dejitter_4d_dct(x, period=self.dejitter_period, harmonics=True,
                                band_width=1, dtype=np.float32,
                                verbose=bool(self.verbose))
 
@@ -441,3 +442,315 @@ class MACE4DModel:
         if self.verbose:
             print(f"[MACE] Initialization done in {time.time() - t0:.2f} sec.")
         return init_image
+
+
+# Thread-local denoiser cache: key = (shape, device), value = QGGMRFDenoiser.
+# Ensures no denoiser instance is shared across threads (critical for multi-GPU).
+_THREAD_LOCAL = threading.local()
+
+
+# ---------------------------------------------------------------------------
+# Time frame construction
+# ---------------------------------------------------------------------------
+
+def construct_time_frames(sino, model, angle_span_per_frame, angle_stride):
+    """
+    Split a full sinogram into overlapping fixed-size time frames.
+
+    The number of views per frame and the stride between frames are derived
+    from the model's angle spacing, so they stay correct under view subsampling.
+
+    Parameters
+    ----------
+    sino : ndarray, shape (num_views, det_rows, det_cols)
+    model : mbirjax.ConeBeamModel
+        Fully-built model for the full scan.
+    angle_span_per_frame : float
+        Angular span (radians) covered by each time frame.
+    angle_stride : float
+        Radians advanced per frame step.
+
+    Returns
+    -------
+    sino_frames : list of ndarray
+        Each covers angle_span_per_frame radians of views. Trailing views that
+        cannot form a full frame are discarded.
+    model_frames : list of mbirjax.ConeBeamModel
+        Per-frame models built via mj.copy_ct_model.
+    """
+    required_params, _, _ = model.get_all_params()
+    angles = required_params["angles"]
+    num_views = sino.shape[0]
+
+    # Angle step in radians from the model's actual view spacing.
+    angle_step = float(np.median(np.abs(np.diff(angles))))
+    if angle_step <= 0:
+        raise ValueError("Model angles must have nonzero spacing.")
+    views_per_frame = int(round(angle_span_per_frame / angle_step))
+    stride          = int(round(angle_stride / angle_step))
+
+    if views_per_frame <= 0:
+        raise ValueError("angle_span_per_frame must cover at least one view.")
+    if stride <= 0:
+        raise ValueError("angle_stride must cover at least one view.")
+    if views_per_frame > num_views:
+        raise ValueError("angle_span_per_frame cannot exceed the full scan.")
+
+    sino_frames = []
+    model_frames = []
+    for start in range(0, num_views - views_per_frame + 1, stride):
+        sl = slice(start, start + views_per_frame)
+        sino_frames.append(sino[sl])
+        model_frames.append(mj.copy_ct_model(model, new_angles=angles[sl]))
+    return sino_frames, model_frames
+
+
+# ---------------------------------------------------------------------------
+# DCT-I temporal dejitter
+# ---------------------------------------------------------------------------
+
+def _dejitter_4d_dct(
+    recon_4d,
+    period,
+    harmonics=True,
+    band_width=1,
+    dtype=np.float32,
+    chunk_size=None,
+    verbose=True,
+):
+    """
+    Remove periodic temporal jitter from a 4D reconstruction via DCT-I filtering.
+
+    Parameters
+    ----------
+    recon_4d : ndarray, shape (time, x, y, z)
+    period : float or int
+        Main jitter period in frames (e.g. 6 for a 6-phase gating protocol).
+    harmonics : bool or list of int
+        True  → remove main period and all harmonics with period/h >= 2.
+        False → remove only the main period.
+        list  → explicit list of harmonic indices h to remove.
+    band_width : int
+        Number of DCT-I modes to zero on each side of the target mode.
+        band_width=1 zeroes [k_center-1, k_center, k_center+1].
+    dtype : np.dtype
+        Working dtype (float32 reduces memory).
+    chunk_size : int or None
+        Process the last spatial axis in chunks of this size to reduce peak
+        memory. None processes the whole axis in one pass.
+    verbose : bool
+        Print the modes being zeroed.
+
+    Returns
+    -------
+    recon_dejittered : ndarray, same shape as recon_4d
+    """
+    recon_4d = np.asarray(recon_4d)
+    N = recon_4d.shape[0]
+    spatial_shape = recon_4d.shape[1:]
+
+    if harmonics is False:
+        harmonic_list = [1]
+    elif harmonics is True:
+        max_h = int(np.floor(period / 2))
+        harmonic_list = list(range(1, max_h + 1))
+    else:
+        harmonic_list = list(harmonics)
+
+    periods_to_remove = [period / h for h in harmonic_list]
+
+    if verbose:
+        print("Input shape:", recon_4d.shape)
+        print("Periods to remove:", periods_to_remove)
+
+    Z = spatial_shape[-1]
+    if chunk_size is None:
+        chunk_size = Z
+
+    recon_dejittered = np.empty((N,) + spatial_shape, dtype=dtype)
+    for z0 in range(0, Z, chunk_size):
+        z1 = min(z0 + chunk_size, Z)
+        block = np.asarray(recon_4d[..., z0:z1], dtype=dtype)
+        C = dct(block, type=1, norm="ortho", axis=0)
+        for p in periods_to_remove:
+            k_center = 2 * (N - 1) / p
+            k0 = int(round(k_center))
+            lo = max(0, k0 - band_width)
+            hi = min(C.shape[0], k0 + band_width + 1)
+            if lo < hi:
+                C[lo:hi, ...] = 0
+            if verbose and z0 == 0:
+                actual_period = 2 * (N - 1) / k0 if k0 != 0 else np.inf
+                print(
+                    f"  Removed period {p:.3g}: "
+                    f"k≈{k_center:.2f}, rounded k={k0}, "
+                    f"actual period≈{actual_period:.3g}, "
+                    f"zeroed k={lo}:{hi - 1}"
+                )
+        recon_dejittered[..., z0:z1] = idct(C, type=1, norm="ortho", axis=0).astype(dtype, copy=False)
+        del block, C
+    return recon_dejittered
+
+
+# ---------------------------------------------------------------------------
+# Weight helpers
+# ---------------------------------------------------------------------------
+
+def _normalize_prior_weights(prior_weight):
+    """
+    Convert a scalar or list prior weight into [forward_w, xyt_w, yzt_w, xzt_w].
+
+    Scalar w → [1-w, w/3, w/3, w/3].
+    List/tuple [w1, w2, w3] → [1-(w1+w2+w3), w1, w2, w3].
+    """
+    if isinstance(prior_weight, (list, tuple, np.ndarray)):
+        prior = [float(w) for w in prior_weight]
+        if len(prior) != 3:
+            raise ValueError("prior_weight list must have 3 entries [xyt, yzt, xzt].")
+    else:
+        w = float(prior_weight) / 3.0
+        prior = [w, w, w]
+    if any(w < 0 for w in prior) or sum(prior) > 1.0:
+        raise ValueError("prior weights must be nonnegative and sum to at most 1.")
+    return [1.0 - sum(prior)] + prior
+
+
+# ---------------------------------------------------------------------------
+# Device-pinned denoiser helpers
+# ---------------------------------------------------------------------------
+#
+# IMPORTANT: each QGGMRFDenoiser must be pinned to exactly ONE GPU via
+# configure_devices([device]). Without this, mbirjax auto-shards the denoiser
+# across every visible GPU using a NamedSharding Mesh. Running 4 such denoisers
+# concurrently then causes each thread's model to open its own 4-way NCCL
+# clique simultaneously — producing an "Acquire clique ... may be stuck" deadlock.
+# Cache key includes the device so each thread gets its own pinned instance.
+
+def _get_qggmrf_denoiser(shape, device):
+    """Return a per-thread, per-device cached QGGMRFDenoiser pinned to one GPU."""
+    cache = getattr(_THREAD_LOCAL, "denoiser_cache", None)
+    if cache is None:
+        cache = {}
+        _THREAD_LOCAL.denoiser_cache = cache
+    key = (shape, device)
+    if key not in cache:
+        denoiser = mj.QGGMRFDenoiser(shape)
+        denoiser.configure_devices([device])
+        cache[key] = denoiser
+    return cache[key]
+
+
+def _estimate_sigma_per_hyperplane(x, device, sigma_noise_floor=1e-6):
+    """
+    Estimate one noise sigma per hyperplane slice.
+
+    Parameters
+    ----------
+    x : ndarray, shape (num_hyperplanes, dim1, dim2)
+    device : jax device
+        The denoiser is pinned to this device.
+
+    Returns
+    -------
+    sigma_list : ndarray, shape (num_hyperplanes,), dtype float32
+    """
+    denoiser = _get_qggmrf_denoiser(x.shape[1:], device)
+    sigma_list = np.empty(x.shape[0], dtype=np.float32)
+    for i in range(x.shape[0]):
+        sigma_use = denoiser.estimate_image_noise_std(x[i][:, ::4, ::4])
+        if (not np.isfinite(sigma_use)) or (sigma_use <= sigma_noise_floor):
+            sigma_use = 0.0
+        sigma_list[i] = sigma_use
+    return sigma_list
+
+
+def _qggmrf_hyperplane_denoise(x, sigma_list, device, sigma_noise_floor=1e-6):
+    """
+    Denoise a stack of hyperplane slices on a single JAX device.
+
+    Parameters
+    ----------
+    x : ndarray, shape (num_hyperplanes, dim1, dim2)
+    sigma_list : ndarray, shape (num_hyperplanes,)
+    device : jax device
+
+    Returns
+    -------
+    y : ndarray, same shape as x
+    """
+    y = np.empty_like(x)
+    with jax.default_device(device):
+        denoiser = _get_qggmrf_denoiser(x.shape[1:], device)
+        for i in range(x.shape[0]):
+            sigma_use = sigma_list[i]
+            if (not np.isfinite(sigma_use)) or (sigma_use <= sigma_noise_floor):
+                y[i] = x[i]
+            else:
+                image_i = jax.device_put(jnp.asarray(x[i]), device)
+                y_i, _ = denoiser.denoise(image=image_i, sigma_noise=sigma_use)
+                y[i] = np.asarray(y_i)
+    return y
+
+
+def _denoiser_wrapper(x, permute_vector, sigma_list, device):
+    """
+    Permute a 4D volume, denoise the resulting hyperplane stack, then unpermute.
+
+    Parameters
+    ----------
+    x : ndarray, shape (nt, nx, ny, nz)
+    permute_vector : tuple of int
+        Permutation that puts the hyperplane axis first.
+    sigma_list : ndarray
+        Per-hyperplane noise sigmas (from _estimate_sigma_per_hyperplane).
+    device : jax device
+        Device on which denoising runs.
+
+    Returns
+    -------
+    y : ndarray, same shape as x
+    """
+    x_perm = np.transpose(x, permute_vector)
+    y_perm = _qggmrf_hyperplane_denoise(x_perm, sigma_list=sigma_list, device=device)
+    inv_perm = np.argsort(permute_vector)
+    return np.transpose(y_perm, inv_perm)
+
+
+# ---------------------------------------------------------------------------
+# Visualization
+# ---------------------------------------------------------------------------
+
+def gen_gif_and_save(recon, gif_path, vmin=0, vmax=0.06, x_slice=None, duration=0.15):
+    """
+    Generate a GIF of one x slice (YZ plane) of a 4D reconstruction stepping
+    through time frames. The x slice shows the motion clearly.
+
+    Parameters
+    ----------
+    recon : ndarray, shape (nt, nx, ny, nz)
+    gif_path : str
+        Output path for the saved GIF.
+    vmin, vmax : float
+        Colormap range for imshow.
+    x_slice : int or None
+        X index to display. Defaults to the middle slice.
+    duration : float
+        Duration per frame in seconds.
+    """
+    if x_slice is None:
+        x_slice = recon.shape[1] // 2
+
+    frames = []
+    for t in range(recon.shape[0]):
+        fig, ax = plt.subplots(1, 1, figsize=(6, 6))
+        ax.imshow(recon[t, x_slice, :, :], cmap='gray', vmin=vmin, vmax=vmax)
+        ax.set_title(f't={t}')
+        ax.axis('off')
+        fig.suptitle(f'x slice = {x_slice}, time frame = {t}', fontsize=14)
+        plt.tight_layout()
+        fig.canvas.draw()
+        frames.append(np.asarray(fig.canvas.buffer_rgba()))
+        plt.close(fig)
+
+    imageio.mimsave(gif_path, frames, duration=duration)
+    print(f"Saved GIF to: {gif_path}")

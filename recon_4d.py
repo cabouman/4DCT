@@ -29,8 +29,7 @@ import mbirjax as mj
 import mbirjax.preprocess as mjp
 import numpy as np
 
-from model_4d import MACE4DModel
-from utils import construct_time_frames, gen_gif_and_save
+from mace4d import MACE4DModel, construct_time_frames, gen_gif_and_save
 
 
 def parse_args():
@@ -140,7 +139,7 @@ def main():
         print(f"Using first {len(sino_frames)} frames (--num_frames={args.num_frames}).")
 
     print("\n************** Build 4D MACE model **************")
-    model_4d = MACE4DModel(
+    mace_model = MACE4DModel(
         sino_list=sino_frames,
         model_list=model_frames,
         prior_weight=args.prior_weight,
@@ -156,7 +155,7 @@ def main():
 
     print("\n************** Run 4D MACE reconstruction **************")
     time0 = time.time()
-    recon_4d = model_4d.recon(
+    recon_4d = mace_model.recon(
         parallel=not args.serial,
         init_dir=init_dir,
         log_dir=log_dir,

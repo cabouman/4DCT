@@ -24,15 +24,14 @@ On a second run with the same settings, the saved initialization in `output/init
 4DCT/
 ├── demo_4d.sh            # shell entry point — edit DATA_PATH and run
 ├── recon_4d.py           # command-line reconstruction driver (all params as flags)
-├── model_4d.py           # MACE4DModel class (serial + multi-GPU)
-├── utils.py              # shared utilities (time-frame construction, dejitter, denoiser helpers)
+├── mace4d.py             # MACE4DModel class + all 4D helpers (frames, dejitter, denoisers, GIF)
 ├── plans/
 │   ├── refactor_plan.md  # design decisions and interface discussion
 │   └── lilly_interface.md # parameter reference for Lilly operators
 └── tmp/                  # setup helpers (install deps, download data)
 ```
 
-The original serial and multi-GPU implementations (`4DMACE_serial/`, `4DMACE_multi_threads/`) were merged into `model_4d.py` and `utils.py`; git history preserves them.
+The original serial and multi-GPU implementations (`4DMACE_serial/`, `4DMACE_multi_threads/`) were merged into `mace4d.py`; git history preserves them.
 
 ## File Roles
 
@@ -40,14 +39,12 @@ The original serial and multi-GPU implementations (`4DMACE_serial/`, `4DMACE_mul
 |------|---------|
 | `demo_4d.sh` | Shell entry point. Edit `DATA_PATH`; everything else has sensible defaults. |
 | `recon_4d.py` | Reconstruction driver. Every parameter is a CLI flag with a validated default: data path, downsampling, frame geometry, MACE hyperparameters, execution mode (`--serial`, `--device_indices`). |
-| `model_4d.py` | `MACE4DModel` class. Call `model.recon(parallel=True)` for multi-GPU or `model.recon(parallel=False)` for serial. |
-| `utils.py` | Stateless helpers shared by both modes: `construct_time_frames`, `dejitter_4d_dct`, denoiser utilities. |
+| `mace4d.py` | The complete 4D functional block: `MACE4DModel` (call `model.recon(parallel=True)` for multi-GPU, `parallel=False` for serial) plus time-frame construction, DCT-I dejitter, hyperplane-denoiser helpers, and the GIF writer. |
 
 ## MACE4DModel Interface
 
 ```python
-from model_4d import MACE4DModel
-from utils import construct_time_frames
+from mace4d import MACE4DModel, construct_time_frames
 
 # 1. Preprocess with mbirjax
 sino, ct_model = mjp.nsi.get_sino_and_model(dataset_dir, ...)
@@ -59,8 +56,8 @@ sino_frames, model_frames = construct_time_frames(sino, ct_model,
                                                   angle_stride=np.radians(60.0))
 
 # 3. Build model and reconstruct
-model_4d = MACE4DModel(sino_frames, model_frames, prior_weight=0.5, max_mace_itr=10)
-recon_4d = model_4d.recon(parallel=True, init_dir="./output/init")
+mace_model = MACE4DModel(sino_frames, model_frames, prior_weight=0.5, max_mace_itr=10)
+recon_4d = mace_model.recon(parallel=True, init_dir="./output/init")
 ```
 
 ## Multi-GPU Architecture
@@ -80,7 +77,7 @@ Requires ≥4 JAX-visible GPUs. Use `parallel=False` for single-GPU or CPU-only 
 
 ## DCT-I Temporal Dejitter
 
-`dejitter_4d_dct` removes periodic gating jitter (period=6 frames) by zeroing the corresponding DCT-I frequency bands. It is applied:
+The dejitter step removes periodic gating jitter (period=6 frames) by zeroing the corresponding DCT-I frequency bands. It is applied:
 - After the forward agent output
 - Before each prior agent input
 
