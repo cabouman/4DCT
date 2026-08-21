@@ -41,8 +41,7 @@ Entry point for Lilly production runs. Launched via `bash demo_4d.sh` or directl
 | `--sharpness` | `1.0` | Sharpness parameter passed to `ct_model` |
 | `--sigma_p` | *(auto)* | Proximal sigma; omit for automatic selection |
 | `--no_dejitter` | *(off)* | Disables the DCT-I temporal dejitter |
-| `--serial` | *(off)* | Run agents sequentially on one device instead of 4 GPUs |
-| `--device_indices` | `0 1 2 3` | GPU assignment: `[forward, prior_xyt, prior_yzt, prior_xzt]` |
+| `--serial` | *(off)* | Run all tasks on one device. By default all visible GPUs are used; restrict with `CUDA_VISIBLE_DEVICES` |
 | `--download_dir` | `./data` | Extraction directory when `--data_path` is a `.tgz` |
 | `--verbose` | `1` | 0 = silent, 1 = progress, 2 = debug |
 
@@ -71,4 +70,5 @@ Entry point for Lilly production runs. Launched via `bash demo_4d.sh` or directl
 | `recon_4d_<time>h.npy` | Final 4D reconstruction, shape `(nt, nx, ny, nz)` |
 | `init/init_image.npy` | Per-frame MBIR initialization; reused automatically on re-runs when its shape matches |
 | `logs/run_info.txt` | Human-readable summary of all run settings |
-| `logs/timing_log.csv` | Per-iteration agent wall times and consensus change (%) |
+| `logs/timing_log.csv` | Per-iteration prox/denoise/makespan times and consensus change (%) |
+| `logs/task_log.csv` | One row per task: iteration, kind, index, device, start, end |

@@ -72,9 +72,8 @@ def parse_args():
 
     g = parser.add_argument_group("execution")
     g.add_argument("--serial", action="store_true",
-                   help="Run the agents sequentially on one device instead of 4 GPUs.")
-    g.add_argument("--device_indices", type=int, nargs=4, default=[0, 1, 2, 3],
-                   metavar=("FWD", "XYT", "YZT", "XZT"), help="GPU indices for the four agents (parallel mode).")
+                   help="Run all tasks on one device (alias for one-device mode). "
+                        "By default all visible GPUs are used; restrict them with CUDA_VISIBLE_DEVICES.")
     g.add_argument("--verbose", type=int, default=1, help="0 = silent, 1 = progress, 2 = debug.")
 
     return parser.parse_args()
@@ -156,10 +155,9 @@ def main():
     print("\n************** Run 4D MACE reconstruction **************")
     time0 = time.time()
     recon_4d = mace_model.recon(
-        parallel=not args.serial,
+        devices=1 if args.serial else None,
         init_dir=init_dir,
         log_dir=log_dir,
-        device_indices=args.device_indices,
     )
     run_time_h = (time.time() - time0) / 3600
 

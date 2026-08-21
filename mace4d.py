@@ -5,18 +5,18 @@ This module is one self-contained functional block (intended for a later merge
 into mbirjax): the MACE4DModel class plus the helpers it uses for time-frame
 construction, DCT-I temporal dejitter, hyperplane denoising, and visualization.
 
-MACE4DModel runs the 4-agent MACE algorithm (one cone-beam prox_map agent +
-three qGGMRF prior agents across XY-t, YZ-t, XZ-t hyperplanes) behind a single
-recon() entry point. One MACE loop serves both execution modes:
-
-  parallel=True  — agents run concurrently in a ThreadPoolExecutor, one GPU
-                   each (requires ≥4 GPUs). GPU pinning prevents NCCL deadlock.
-  parallel=False — the same agents run sequentially on jax.devices()[0].
+MACE4DModel runs the MACE algorithm (one cone-beam prox_map per time frame +
+three batched qGGMRF denoisers across the XY-t, YZ-t, XZ-t hyperplanes) behind
+a single recon() entry point. Each iteration's work is a set of independent
+tasks executed by one worker thread per device with a fixed least-loaded
+assignment; a single device runs the same tasks inline.
 """
 from __future__ import annotations
 
 import concurrent.futures
 import csv
+import io
+import logging
 import os
 import threading
 import time
@@ -41,13 +41,19 @@ _PRIOR_ORIENTATIONS = [
 
 _TIMING_FIELDS = [
     "iteration",
-    "agent_0_forward_sec",
-    "agent_1_prior_xyt_sec",
-    "agent_2_prior_yzt_sec",
-    "agent_3_prior_xzt_sec",
+    "prox_total_sec",
+    "denoise_total_sec",
+    "makespan_sec",
     "iteration_total_sec",
     "consensus_change_pct",
 ]
+
+_TASK_FIELDS = ["iteration", "kind", "index", "device", "start_sec", "end_sec"]
+
+# Estimated cost of denoising one hyperplane, in units of one prox_map task.
+# Measured on an H100 at smoke scale; only the relative size matters, and only
+# for the static load-balancing assignment.
+_DENOISE_COST_PER_PLANE = 0.015
 
 
 class MACE4DModel:
@@ -117,8 +123,9 @@ class MACE4DModel:
 
         if verbose:
             print(f"[MACE4D] Building weights for {self.nt} time frames...")
+        # Host copies; recon() places each frame's weights on its assigned device.
         self.weights_list = [
-            mj.gen_weights(jnp.asarray(s), weight_type=weight_type)
+            np.asarray(mj.gen_weights(jnp.asarray(s), weight_type=weight_type))
             for s in sino_list
         ]
         if verbose:
@@ -131,13 +138,16 @@ class MACE4DModel:
     def recon(
         self,
         init_image=None,
-        parallel=True,
+        devices=None,
         init_dir=None,
         log_dir=None,
-        device_indices=None,
     ):
         """
         Run 4D MACE reconstruction.
+
+        Each iteration is a set of independent tasks — one prox_map per time
+        frame and one batched denoise per prior orientation — executed by one
+        worker thread per device with a fixed least-loaded task assignment.
 
         Parameters
         ----------
@@ -145,19 +155,17 @@ class MACE4DModel:
             Initial 4D image, shape (nt, nx, ny, nz). A wrong shape raises
             ValueError. If None, the initial image comes from init_dir (see
             below) or is recomputed.
-        parallel : bool
-            True  → agents run concurrently, one GPU each (requires ≥4 GPUs).
-            False → the same agents run sequentially on a single device.
+        devices : None, int, or list of jax devices
+            None → all visible GPUs (the CPU when there are none).
+            int n → the first n visible devices.  One device runs the tasks
+            inline with no threads (the serial path).
         init_dir : str or None
             Cache directory for the computed initial image (init_image.npy).
             If it holds an image of the correct shape, that image is used;
             otherwise the initialization is recomputed and saved there.
         log_dir : str or None
-            Directory for log files (run_info.txt, timing_log.csv). Created if
-            needed. None writes no log files.
-        device_indices : list of int or None
-            GPU indices for [forward, prior_xyt, prior_yzt, prior_xzt] in
-            parallel mode. Default: [0, 1, 2, 3].
+            Directory for log files (run_info.txt, timing_log.csv,
+            task_log.csv). Created if needed. None writes no log files.
 
         Returns
         -------
@@ -167,104 +175,122 @@ class MACE4DModel:
         beta = self.beta
         verbose = self.verbose
 
-        agent_devices = self._setup_devices(parallel, device_indices)
+        devs = _resolve_devices(devices)
+        self._assign_and_place(devs)
         if verbose:
+            counts = [self._frame_device.count(d) for d in range(len(devs))]
+            print(f"[MACE] {len(devs)} device(s); prox frames per device: {counts}; "
+                  f"denoise on devices {self._orient_device}.")
             print(f"[MACE] Start 4D reconstruction with {nt} time frames.")
 
-        # ── Initialization ─────────────────────────────────────────────────────
-        if init_image is not None:
-            init_image = self._validate_init_image(init_image)
-            init_source = "provided by caller"
-            if verbose:
-                print("[MACE] Using provided init_image.")
-        else:
-            if init_dir is not None:
-                init_image = self._load_cached_init(init_dir)
+        # One single-thread executor per device: each device's tasks always run
+        # on the same thread, which keeps the per-thread denoiser caches valid
+        # and gives every model object exactly one owning thread.
+        executors = ([concurrent.futures.ThreadPoolExecutor(max_workers=1) for _ in devs]
+                     if len(devs) > 1 else None)
+        # Denoisers reconfigure once per recon (sigma + regularization constants).
+        self._recon_token = getattr(self, "_recon_token", 0) + 1
+        try:
+            # ── Initialization ─────────────────────────────────────────────────
             if init_image is not None:
-                init_source = f"cached ({os.path.join(init_dir, 'init_image.npy')})"
+                init_image = self._validate_init_image(init_image)
+                init_source = "provided by caller"
+                if verbose:
+                    print("[MACE] Using provided init_image.")
             else:
-                init_image = self._compute_init_image(agent_devices[0], init_dir)
-                init_source = (f"computed ({self.nt} frames, "
-                               f"{_INIT_MBIR_ITERATIONS} MBIR iterations each)")
+                if init_dir is not None:
+                    init_image = self._load_cached_init(init_dir)
+                if init_image is not None:
+                    init_source = f"cached ({os.path.join(init_dir, 'init_image.npy')})"
+                else:
+                    init_image = self._compute_init_image(devs, executors, init_dir)
+                    init_source = (f"computed ({self.nt} frames, "
+                                   f"{_INIT_MBIR_ITERATIONS} MBIR iterations each)")
 
-        # ── Global denoiser sigma (one value for all orientations) ─────────────
-        global_sigma = self._estimate_global_sigma(init_image, agent_devices[1])
-        if verbose:
-            print(f"[MACE] Global denoiser sigma = {global_sigma:.6g}")
-
-        # ── MACE state (all on CPU / NumPy) ────────────────────────────────────
-        W = [np.copy(init_image) for _ in range(4)]
-        X = [np.copy(init_image) for _ in range(4)]
-
-        # ── Log files ──────────────────────────────────────────────────────────
-        timing_log_path = None
-        if log_dir is not None:
-            os.makedirs(log_dir, exist_ok=True)
-            self._write_run_info(log_dir, parallel, agent_devices, init_source, global_sigma)
-            timing_log_path = os.path.join(log_dir, "timing_log.csv")
-            with open(timing_log_path, "w", newline="") as f:
-                csv.DictWriter(f, fieldnames=_TIMING_FIELDS).writeheader()
-
-        # ── Main MACE loop ─────────────────────────────────────────────────────
-        # xbar is the consensus average sum(beta[k] X[k]); its relative change
-        # per iteration is the convergence measure logged in timing_log.csv.
-        xbar = init_image
-        for itr in range(self.max_mace_itr):
-            itr_t0 = time.time()
+            # ── Global denoiser sigma (one value for all orientations) ─────────
+            global_sigma = self._estimate_global_sigma(init_image, devs[0])
             if verbose:
-                print(f"\n[MACE] ── Iteration {itr + 1}/{self.max_mace_itr} ──")
+                print(f"[MACE] Global denoiser sigma = {global_sigma:.6g}")
 
-            # Agents only read W; W is not written until the consensus update
-            # after every agent has finished, so no snapshot copy is needed.
-            agent_times = {}
+            # ── MACE state (all on CPU / NumPy) ────────────────────────────────
+            W = [np.copy(init_image) for _ in range(4)]
+            X = [np.copy(init_image) for _ in range(4)]
 
-            if parallel:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-                    futures = {
-                        pool.submit(self._run_forward_agent, W[0], X[0],
-                                    agent_devices[0]): (0, "forward"),
-                    }
-                    for k, (name, perm) in enumerate(_PRIOR_ORIENTATIONS, start=1):
-                        fut = pool.submit(self._run_prior_agent, W[k], agent_devices[k],
-                                          perm, global_sigma, name)
-                        futures[fut] = (k, f"prior {name}")
-                    for fut in concurrent.futures.as_completed(futures):
-                        agent_id, agent_name = futures[fut]
-                        X[agent_id], agent_times[agent_id] = fut.result()
-                        if verbose:
-                            print(
-                                f"[MACE]  Agent {agent_id} ({agent_name}) done "
-                                f"at +{time.time() - itr_t0:.2f} sec."
-                            )
-            else:
-                X[0], agent_times[0] = self._run_forward_agent(W[0], X[0], agent_devices[0])
-                for k, (name, perm) in enumerate(_PRIOR_ORIENTATIONS, start=1):
-                    X[k], agent_times[k] = self._run_prior_agent(
-                        W[k], agent_devices[k], perm, global_sigma, name)
+            # ── Log files ──────────────────────────────────────────────────────
+            timing_log_path = task_log_path = None
+            if log_dir is not None:
+                os.makedirs(log_dir, exist_ok=True)
+                self._write_run_info(log_dir, devs, init_source, global_sigma)
+                timing_log_path = os.path.join(log_dir, "timing_log.csv")
+                with open(timing_log_path, "w", newline="") as f:
+                    csv.DictWriter(f, fieldnames=_TIMING_FIELDS).writeheader()
+                task_log_path = os.path.join(log_dir, "task_log.csv")
+                with open(task_log_path, "w", newline="") as f:
+                    csv.DictWriter(f, fieldnames=_TASK_FIELDS).writeheader()
 
-            # ADMM consensus (CPU)
-            z = sum(beta[k] * (2.0 * X[k] - W[k]) for k in range(4))
-            for k in range(4):
-                W[k] = W[k] + 2.0 * self.rho * (z - X[k])
+            # ── Main MACE loop ─────────────────────────────────────────────────
+            # xbar is the consensus average sum(beta[k] X[k]); its relative
+            # change per iteration is the convergence measure in timing_log.csv.
+            xbar = init_image
+            for itr in range(self.max_mace_itr):
+                itr_t0 = time.time()
+                if verbose:
+                    print(f"\n[MACE] ── Iteration {itr + 1}/{self.max_mace_itr} ──")
 
-            xbar_prev, xbar = xbar, sum(beta[k] * X[k] for k in range(4))
-            denom = np.linalg.norm(xbar_prev)
-            change_pct = 100.0 * np.linalg.norm(xbar - xbar_prev) / denom if denom > 0 else np.inf
+                # Tasks only read W; W is not written until the consensus update
+                # after the barrier, so no snapshot copy is needed.
+                tasks = []
+                for t in range(nt):
+                    d = self._frame_device[t]
+                    tasks.append((d, ("prox", t),
+                                  lambda tt=t, dd=d: self._run_prox_task(tt, W[0][tt], X[0][tt], devs[dd])))
+                for k in range(3):
+                    d = self._orient_device[k]
+                    perm = _PRIOR_ORIENTATIONS[k][1]
+                    tasks.append((d, ("denoise", k),
+                                  lambda kk=k, pp=perm, dd=d: self._run_denoise_task(
+                                      W[kk + 1], pp, global_sigma, devs[dd])))
+                results, task_rows = self._run_task_set(executors, tasks, itr_t0)
 
-            iteration_sec = time.time() - itr_t0
-            timing_row = dict(zip(
-                _TIMING_FIELDS,
-                [itr + 1] + [agent_times[k] for k in range(4)] + [iteration_sec, change_pct],
-            ))
-            if timing_log_path is not None:
-                with open(timing_log_path, "a", newline="") as f:
-                    csv.DictWriter(f, fieldnames=_TIMING_FIELDS).writerow(timing_row)
-            if verbose:
-                print(
-                    f"[MACE] Timing: itr={itr + 1}, "
-                    + ", ".join(f"agent{k}={agent_times[k]:.2f}s" for k in range(4))
-                    + f", total={iteration_sec:.2f}s, change={change_pct:.4f}%"
-                )
+                # Gather in frame order, then dejitter the assembled stack.
+                # X[0] keeps the dejittered stack — it feeds the next prox calls.
+                X[0] = self._dejitter(np.stack([results[("prox", t)] for t in range(nt)]))
+                for k in range(3):
+                    X[k + 1] = results[("denoise", k)]
+
+                # ADMM consensus (CPU)
+                z = sum(beta[k] * (2.0 * X[k] - W[k]) for k in range(4))
+                for k in range(4):
+                    W[k] = W[k] + 2.0 * self.rho * (z - X[k])
+
+                xbar_prev, xbar = xbar, sum(beta[k] * X[k] for k in range(4))
+                denom = np.linalg.norm(xbar_prev)
+                change_pct = 100.0 * np.linalg.norm(xbar - xbar_prev) / denom if denom > 0 else np.inf
+
+                iteration_sec = time.time() - itr_t0
+                prox_total = sum(r[4] - r[3] for r in task_rows if r[0] == "prox")
+                denoise_total = sum(r[4] - r[3] for r in task_rows if r[0] == "denoise")
+                makespan = max(r[4] for r in task_rows)
+                timing_row = dict(zip(_TIMING_FIELDS,
+                                      [itr + 1, prox_total, denoise_total, makespan,
+                                       iteration_sec, change_pct]))
+                if timing_log_path is not None:
+                    with open(timing_log_path, "a", newline="") as f:
+                        csv.DictWriter(f, fieldnames=_TIMING_FIELDS).writerow(timing_row)
+                    with open(task_log_path, "a", newline="") as f:
+                        w = csv.DictWriter(f, fieldnames=_TASK_FIELDS)
+                        for kind, index, dev_idx, start, end in sorted(task_rows, key=lambda r: r[3]):
+                            w.writerow(dict(zip(_TASK_FIELDS,
+                                                [itr + 1, kind, index, dev_idx,
+                                                 round(start, 3), round(end, 3)])))
+                if verbose:
+                    print(f"[MACE] Timing: itr={itr + 1}, prox={prox_total:.2f}s, "
+                          f"denoise={denoise_total:.2f}s, makespan={makespan:.2f}s, "
+                          f"total={iteration_sec:.2f}s, change={change_pct:.4f}%")
+        finally:
+            if executors is not None:
+                for ex in executors:
+                    ex.shutdown(wait=True)
 
         if verbose:
             print("\n[MACE] Reconstruction complete.")
@@ -272,76 +298,107 @@ class MACE4DModel:
         return xbar
 
     # ------------------------------------------------------------------
-    # Agents and helpers
+    # Task execution
     # ------------------------------------------------------------------
 
-    def _setup_devices(self, parallel, device_indices):
-        """Pick one device per agent and pin every per-frame model to Agent 0's device."""
-        if parallel:
-            devices = jax.devices("gpu")
-            if len(devices) < 4:
-                raise RuntimeError(f"Need at least 4 GPUs, found {len(devices)}.")
-            if device_indices is None:
-                device_indices = [0, 1, 2, 3]
-            agent_devices = [devices[i] for i in device_indices]
-            if self.verbose:
-                print(f"[MACE] Found {len(devices)} GPU(s): {devices}")
-                print(
-                    "[MACE] GPU assignment: "
-                    + ", ".join(f"Agent{k}->GPU{idx}" for k, idx in enumerate(device_indices))
-                )
-        else:
-            agent_devices = [jax.devices()[0]] * 4
+    def _assign_and_place(self, devs):
+        """Fix the task-to-device assignment, pin models, and place per-frame data.
 
-        # SINGLE-GPU FIX: pin each per-frame ConeBeamModel to one device.
-        # Without this, every model auto-shards across all GPUs on first call,
-        # causing all 4 agents to open a 4-way NCCL clique simultaneously →
-        # deadlock ("Acquire clique ... may be stuck").
+        The assignment is computed once and reused for every iteration: each
+        model object gets one owning thread, and each frame's sinogram and
+        weights are uploaded to its device once and stay there.
+        """
+        recon_shape = tuple(self.model_list[0].get_params("recon_shape"))
+        plane_counts = [recon_shape[2], recon_shape[0], recon_shape[1]]  # XY-t, YZ-t, XZ-t
+        self._frame_device, self._orient_device = _assign_tasks(self.nt, plane_counts, len(devs))
         for t in range(self.nt):
-            self.model_list[t].configure_devices([agent_devices[0]])
-        if self.verbose:
-            print(f"[MACE] Pinned all {self.nt} ConeBeamModel instances to {agent_devices[0]}.")
-        return agent_devices
+            dev = devs[self._frame_device[t]]
+            self.model_list[t].configure_devices([dev])
+            _silence_model_logging(self.model_list[t], f"mace4d.frame{t}")
+        self._sino_dev = [jax.device_put(np.asarray(self.sino_list[t]),
+                                         devs[self._frame_device[t]]) for t in range(self.nt)]
+        self._weights_dev = [jax.device_put(self.weights_list[t],
+                                            devs[self._frame_device[t]]) for t in range(self.nt)]
+
+    def _run_task_set(self, executors, tasks, t0):
+        """Run tasks [(device_index, tag, fn)] and wait for all of them.
+
+        Inline when executors is None (one device). Returns ({tag: result},
+        [(kind, index, device_index, start, end)]) with times relative to t0.
+        A failed task raises immediately, naming the task.
+        """
+        results = {}
+        rows = []
+
+        def run_one(fn):
+            start = time.time() - t0
+            out = fn()
+            return out, start, time.time() - t0
+
+        if executors is None:
+            for dev_idx, tag, fn in tasks:
+                out, start, end = run_one(fn)
+                results[tag] = out
+                rows.append((tag[0], tag[1], dev_idx, start, end))
+            return results, rows
+
+        futures = {}
+        for dev_idx, tag, fn in tasks:
+            futures[executors[dev_idx].submit(run_one, fn)] = (tag, dev_idx)
+        for fut in concurrent.futures.as_completed(futures):
+            tag, dev_idx = futures[fut]
+            try:
+                out, start, end = fut.result()
+            except Exception as err:
+                raise RuntimeError(f"task {tag} on device {dev_idx} failed") from err
+            results[tag] = out
+            rows.append((tag[0], tag[1], dev_idx, start, end))
+        return results, rows
+
+    def _run_prox_task(self, t, W0_t, X0_t, device):
+        """One frame's proximal map on its assigned device."""
+        return np.asarray(
+            self.model_list[t].prox_map(
+                prox_input=jax.device_put(W0_t, device),
+                sinogram=self._sino_dev[t],
+                sigma_prox=self.sigma_p,
+                weights=self._weights_dev[t],
+                init_recon=jax.device_put(X0_t, device),
+                max_iterations=self.num_prox_iterations,
+                stop_threshold_change_pct=self.stop_threshold,
+                logfile_path=None,
+                print_logs=False,
+            )[0])
+
+    def _run_denoise_task(self, W_k, permute_vector, sigma, device):
+        """One orientation's batched qGGMRF denoise on its assigned device."""
+        return _denoiser_wrapper(self._dejitter(W_k), permute_vector=permute_vector,
+                                 sigma=sigma, device=device,
+                                 config_token=self._recon_token)
+
+    def _init_frame_task(self, t, device):
+        """One frame's MBIR initialization recon on its assigned device."""
+        return np.asarray(
+            self.model_list[t].recon(
+                self._sino_dev[t],
+                weights=self._weights_dev[t],
+                max_iterations=_INIT_MBIR_ITERATIONS,
+                stop_threshold_change_pct=self.stop_threshold,
+                logfile_path=None,
+                print_logs=False,
+            )[0])
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
 
     def _estimate_global_sigma(self, init_image, device):
         """One global noise sigma for all denoising, estimated from the init image."""
         # Merge (nt, nx) so the estimator sees a 3D array; it subsamples internally.
         image_3d = init_image.reshape(-1, init_image.shape[2], init_image.shape[3])
-        denoiser = _get_qggmrf_denoiser(image_3d.shape, device)
+        denoiser = mj.QGGMRFDenoiser(image_3d.shape)
+        denoiser.configure_devices([device])
         return float(denoiser.estimate_image_noise_std(image_3d))
-
-    def _run_forward_agent(self, W_k, X_prev, device):
-        """Agent 0: cone-beam prox_map, one time frame at a time, on one device."""
-        agent_t0 = time.time()
-        out = np.stack([
-            np.asarray(
-                self.model_list[t].prox_map(
-                    prox_input=jax.device_put(jnp.asarray(W_k[t]), device),
-                    sinogram=jax.device_put(jnp.asarray(self.sino_list[t]), device),
-                    sigma_prox=self.sigma_p,
-                    weights=jax.device_put(jnp.asarray(self.weights_list[t]), device),
-                    init_recon=jax.device_put(jnp.asarray(X_prev[t]), device),
-                    max_iterations=self.num_prox_iterations,
-                    stop_threshold_change_pct=self.stop_threshold,
-                )[0]
-            )
-            for t in range(self.nt)
-        ])
-        out = self._dejitter(out)
-        agent_sec = time.time() - agent_t0
-        if self.verbose:
-            print(f"[MACE]  Forward agent ran on {device} in {agent_sec:.2f} sec.")
-        return out, agent_sec
-
-    def _run_prior_agent(self, W_k, device, permute_vector, sigma, agent_name):
-        """Prior agent: batched qGGMRF denoising of one hyperplane orientation."""
-        agent_t0 = time.time()
-        out = _denoiser_wrapper(self._dejitter(W_k), permute_vector=permute_vector,
-                               sigma=sigma, device=device)
-        agent_sec = time.time() - agent_t0
-        if self.verbose:
-            print(f"[MACE]  Prior agent {agent_name} ran on {device} in {agent_sec:.2f} sec.")
-        return out, agent_sec
 
     def _dejitter(self, x):
         """Apply the DCT-I temporal dejitter if enabled; otherwise return x unchanged."""
@@ -351,17 +408,17 @@ class MACE4DModel:
                                band_width=1, dtype=np.float32,
                                verbose=bool(self.verbose))
 
-    def _write_run_info(self, log_dir, parallel, agent_devices, init_source, global_sigma):
+    def _write_run_info(self, log_dir, devs, init_source, global_sigma):
         """Write a human-readable summary of the run settings to run_info.txt."""
         try:
             from importlib.metadata import version
             mbirjax_version = version("mbirjax")
         except Exception:
             mbirjax_version = "unknown"
-        if parallel:
-            mode = "parallel, agents on " + ", ".join(str(d) for d in agent_devices)
+        if len(devs) > 1:
+            mode = f"task queue over {len(devs)} devices: " + ", ".join(str(d) for d in devs)
         else:
-            mode = f"serial on {agent_devices[0]}"
+            mode = f"serial on {devs[0]}"
         lines = [
             "# MACE4DModel run settings",
             f"date                 = {time.strftime('%Y-%m-%d %H:%M:%S')}",
@@ -414,22 +471,20 @@ class MACE4DModel:
             print(f"[MACE] Using cached init from {path}.")
         return init_image
 
-    def _compute_init_image(self, device, init_dir):
-        """Per-frame MBIR recon used as the MACE initial image."""
+    def _compute_init_image(self, devs, executors, init_dir):
+        """Per-frame MBIR recon used as the MACE initial image.
+
+        Uses the same workers and frame-to-device assignment as the MACE loop,
+        so compiled programs and resident data carry over.
+        """
         if self.verbose:
-            print(f"[MACE] Computing initial MBIR recon on {device} (one frame at a time)...")
+            print(f"[MACE] Computing initial MBIR recon on {len(devs)} device(s)...")
         t0 = time.time()
-        init_image = np.stack([
-            np.asarray(
-                self.model_list[t].recon(
-                    jax.device_put(jnp.asarray(self.sino_list[t]), device),
-                    weights=jax.device_put(jnp.asarray(self.weights_list[t]), device),
-                    max_iterations=_INIT_MBIR_ITERATIONS,
-                    stop_threshold_change_pct=self.stop_threshold,
-                )[0]
-            )
-            for t in range(self.nt)
-        ])
+        tasks = [(self._frame_device[t], ("init", t),
+                  lambda tt=t: self._init_frame_task(tt, devs[self._frame_device[tt]]))
+                 for t in range(self.nt)]
+        results, _ = self._run_task_set(executors, tasks, t0)
+        init_image = np.stack([results[("init", t)] for t in range(self.nt)])
         if init_dir is not None:
             os.makedirs(init_dir, exist_ok=True)
             np.save(os.path.join(init_dir, "init_image.npy"), init_image)
@@ -441,6 +496,75 @@ class MACE4DModel:
 # Thread-local denoiser cache: key = (shape, device), value = QGGMRFDenoiser.
 # Ensures no denoiser instance is shared across threads (critical for multi-GPU).
 _THREAD_LOCAL = threading.local()
+
+
+# ---------------------------------------------------------------------------
+# Device selection and task assignment
+# ---------------------------------------------------------------------------
+
+def _resolve_devices(devices):
+    """Return the list of jax devices to use.
+
+    None → all visible GPUs (the CPU when there are none).  int n → the first
+    n visible devices.  A list of jax devices is used as given.
+    """
+    if devices is None:
+        try:
+            return jax.devices("gpu")
+        except RuntimeError:
+            return [jax.devices()[0]]
+    if isinstance(devices, int):
+        try:
+            pool = jax.devices("gpu")
+        except RuntimeError:
+            pool = jax.devices()
+        if not 1 <= devices <= len(pool):
+            raise ValueError(f"devices={devices}, but {len(pool)} device(s) are visible.")
+        return pool[:devices]
+    return list(devices)
+
+
+def _assign_tasks(num_frames, plane_counts, num_devices):
+    """Fixed least-loaded-first assignment of tasks to devices.
+
+    The denoise tasks (estimated cost proportional to their hyperplane count)
+    are placed first, largest first; then each unit-cost prox task goes to the
+    least-loaded device.
+
+    Returns
+    -------
+    frame_device : list of int, device index for each frame's prox task
+    orient_device : list of int, device index for each orientation's denoise
+    """
+    loads = [0.0] * num_devices
+    orient_device = [0] * len(plane_counts)
+    for k in sorted(range(len(plane_counts)), key=lambda k: -plane_counts[k]):
+        d = loads.index(min(loads))
+        orient_device[k] = d
+        loads[d] += _DENOISE_COST_PER_PLANE * plane_counts[k]
+    frame_device = [0] * num_frames
+    for t in range(num_frames):
+        d = loads.index(min(loads))
+        frame_device[t] = d
+        loads[d] += 1.0
+    return frame_device, orient_device
+
+
+def _silence_model_logging(model, name):
+    """Give the model a private no-op logger.
+
+    mbirjax's setup_logger rebuilds handlers on a logger that is shared by
+    every model of one class, which races when tasks run concurrently. A
+    private logger with a NullHandler and a no-op setup_logger removes the
+    shared mutable state; progress still reaches the console via the MACE
+    timing prints.
+    """
+    logger = logging.getLogger(name)
+    logger.handlers = [logging.NullHandler()]
+    logger.propagate = False
+    model.logger = logger
+    model.log_buffer = io.StringIO()
+    model.setup_logger = lambda *args, **kwargs: None
 
 
 # ---------------------------------------------------------------------------
@@ -643,6 +767,10 @@ _DENOISE_STOP_THRESHOLD_PCT = 0.2
 # by measurement on the target GPU.
 _DENOISE_BUFFER_MULTIPLIER = 16
 
+# Absolute cap on the denoise batch size, so a bad memory estimate cannot
+# request an enormous compile.
+_DENOISE_BATCH_CAP = 128
+
 
 def _configure_denoiser(denoiser, sigma, image_for_stats):
     """Set the shared sigma and the regularization constants on the denoiser.
@@ -663,6 +791,9 @@ def _configure_denoiser(denoiser, sigma, image_for_stats):
     # otherwise repeated calls run different VCD subset orders.
     denoiser._mace4d_constants = None
     _denoise_constants(denoiser)
+    # New constants invalidate the cached batch size and compiled batch function.
+    denoiser._mace4d_batch = None
+    denoiser._mace4d_batched_fn = None
 
 
 def _denoise_constants(denoiser):
@@ -671,7 +802,12 @@ def _denoise_constants(denoiser):
     if cached is not None:
         return cached
     image_shape, granularity = denoiser.get_params(['recon_shape', 'granularity'])
-    partition = mj.gen_set_of_pixel_partitions(image_shape, [granularity[0]],
+    # Keep at least ~64 pixels per VCD subset: with very small subsets the
+    # qGGMRF line search can hit 0/0 in flat regions. At real volume sizes
+    # this leaves the subset count unchanged.
+    num_pixels = image_shape[0] * image_shape[1]
+    num_subsets = max(1, min(granularity[0], num_pixels // 64))
+    partition = mj.gen_set_of_pixel_partitions(image_shape, [num_subsets],
                                                use_ror_mask=False)[0]
     fm_constant = 1.0 / (denoiser.get_params('sigma_y') ** 2.0)
     qggmrf_nbr_wts, sigma_x, p, q, T = denoiser.get_params(
@@ -720,19 +856,41 @@ def _batched_hyperplane_denoise(x, denoiser, device):
             qggmrf_params, image_shape, _DENOISE_MAX_ITERATIONS, stop_thresh, 0)
         return out
 
-    batch = _auto_batch_size(vol_shape, device)
+    # One fixed batch size and one compiled batch function per configuration.
+    # The last block is padded to the fixed size so every call reuses the same
+    # compiled program.
+    if getattr(denoiser, "_mace4d_batch", None) is None:
+        denoiser._mace4d_batch = min(_DENOISE_BATCH_CAP, num_vols,
+                                     _auto_batch_size(vol_shape, device))
+        denoiser._mace4d_batched_fn = jax.jit(jax.vmap(denoise_one))
+
     flat = x.reshape(num_vols, -1, vol_shape[-1])
     y = np.empty_like(x)
+    b0 = 0
     with jax.default_device(device):
-        for b0 in range(0, num_vols, batch):
+        while b0 < num_vols:
+            batch = denoiser._mace4d_batch
+            fn = denoiser._mace4d_batched_fn
             b1 = min(b0 + batch, num_vols)
-            block = jax.device_put(jnp.asarray(flat[b0:b1]), device)
-            out = jax.vmap(denoise_one)(block)
-            y[b0:b1] = np.asarray(out).reshape((b1 - b0,) + vol_shape)
+            block = flat[b0:b1]
+            if b1 - b0 < batch:
+                pad = np.zeros((batch - (b1 - b0),) + block.shape[1:], dtype=block.dtype)
+                block = np.concatenate([block, pad], axis=0)
+            try:
+                out = np.asarray(fn(jax.device_put(block, device)))
+            except Exception as err:
+                # Out of device memory: halve the batch and recompile once.
+                if "RESOURCE_EXHAUSTED" in str(err) and denoiser._mace4d_batch > 1:
+                    denoiser._mace4d_batch = max(1, denoiser._mace4d_batch // 2)
+                    denoiser._mace4d_batched_fn = jax.jit(jax.vmap(denoise_one))
+                    continue
+                raise
+            y[b0:b1] = out[: b1 - b0].reshape((b1 - b0,) + vol_shape)
+            b0 = b1
     return y
 
 
-def _denoiser_wrapper(x, permute_vector, sigma, device):
+def _denoiser_wrapper(x, permute_vector, sigma, device, config_token=None):
     """
     Permute a 4D volume so the hyperplane axis is first, batch-denoise the
     resulting stack of 3D volumes at the shared global sigma, then unpermute.
@@ -746,6 +904,10 @@ def _denoiser_wrapper(x, permute_vector, sigma, device):
         Global noise sigma shared by every volume.
     device : jax device
         Device on which denoising runs.
+    config_token : hashable or None
+        Configure the denoiser (sigma, regularization constants, partition)
+        only when this token changes — once per recon. None reconfigures on
+        every call.
 
     Returns
     -------
@@ -753,9 +915,11 @@ def _denoiser_wrapper(x, permute_vector, sigma, device):
     """
     x_perm = np.ascontiguousarray(np.transpose(x, permute_vector))
     denoiser = _get_qggmrf_denoiser(x_perm.shape[1:], device)
-    # Regularization statistics come from the whole stack (merged to 3D), so
-    # every orientation sees the same voxel population.
-    _configure_denoiser(denoiser, sigma, x_perm.reshape(-1, *x_perm.shape[2:]))
+    if config_token is None or getattr(denoiser, "_mace4d_token", None) != config_token:
+        # Regularization statistics come from the whole stack (merged to 3D),
+        # so every orientation sees the same voxel population.
+        _configure_denoiser(denoiser, sigma, x_perm.reshape(-1, *x_perm.shape[2:]))
+        denoiser._mace4d_token = config_token
     y_perm = _batched_hyperplane_denoise(x_perm, denoiser, device)
     inv_perm = np.argsort(permute_vector)
     return np.transpose(y_perm, inv_perm)

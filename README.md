@@ -42,8 +42,8 @@ The original serial and multi-GPU implementations (`4DMACE_serial/`, `4DMACE_mul
 | File | Purpose |
 |------|---------|
 | `demo_4d.sh` | Shell entry point. Edit `DATA_PATH`; everything else has sensible defaults. |
-| `recon_4d.py` | Reconstruction driver. Every parameter is a CLI flag with a validated default: data path, downsampling, frame geometry, MACE hyperparameters, execution mode (`--serial`, `--device_indices`). |
-| `mace4d.py` | The complete 4D functional block: `MACE4DModel` (call `model.recon(parallel=True)` for multi-GPU, `parallel=False` for serial) plus time-frame construction, DCT-I dejitter, hyperplane-denoiser helpers, and the GIF writer. |
+| `recon_4d.py` | Reconstruction driver. Every parameter is a CLI flag with a validated default: data path, downsampling, frame geometry, MACE hyperparameters, execution mode (`--serial`; by default all visible GPUs are used — restrict with `CUDA_VISIBLE_DEVICES`). |
+| `mace4d.py` | The complete 4D functional block: `MACE4DModel` (`model.recon(devices=None)` uses all visible GPUs; `devices=1` is the serial path) plus time-frame construction, DCT-I dejitter, hyperplane-denoiser helpers, and the GIF writer. |
 
 ## MACE4DModel Interface
 
@@ -61,23 +61,20 @@ sino_frames, model_frames = construct_time_frames(sino, ct_model,
 
 # 3. Build model and reconstruct
 mace_model = MACE4DModel(sino_frames, model_frames, prior_weight=0.5, max_mace_itr=10)
-recon_4d = mace_model.recon(parallel=True, init_dir="./output/init")
+recon_4d = mace_model.recon(init_dir="./output/init")  # all visible GPUs
 ```
 
 ## Multi-GPU Architecture
 
-Four agents run concurrently via `ThreadPoolExecutor(4)`:
+Each MACE iteration is a set of independent tasks: one cone-beam `prox_map` per
+time frame and one batched qGGMRF denoise per hyperplane orientation (XY-t,
+YZ-t, XZ-t). One worker thread per visible GPU executes the tasks; a fixed
+least-loaded assignment, computed once, maps every task to one GPU for the
+whole run. The per-frame initialization uses the same workers and map.
 
-| Agent | Role | GPU |
-|-------|------|-----|
-| 0 | Cone-beam `prox_map` (forward model) | GPU 0 |
-| 1 | qGGMRF denoiser, XY-t hyperplanes | GPU 1 |
-| 2 | qGGMRF denoiser, YZ-t hyperplanes | GPU 2 |
-| 3 | qGGMRF denoiser, XZ-t hyperplanes | GPU 3 |
+**GPU pinning**: every `ConeBeamModel` and `QGGMRFDenoiser` is pinned to exactly one GPU via `configure_devices([device])`, and each frame's sinogram and weights live on that GPU for the whole run. Pinning prevents the NCCL clique deadlock that occurs when mbirjax's auto-sharding builds a multi-GPU Mesh inside concurrent threads.
 
-**GPU pinning**: every `ConeBeamModel` and `QGGMRFDenoiser` is pinned to exactly one GPU via `configure_devices([device])`. This prevents the 4-way NCCL clique deadlock that occurs when mbirjax's auto-sharding builds a multi-GPU Mesh inside concurrent threads.
-
-Requires ≥4 JAX-visible GPUs. Use `parallel=False` for single-GPU or CPU-only runs.
+Any number of visible GPUs works; one device (`devices=1`, or CPU-only) runs the same tasks inline with no threads.
 
 ## DCT-I Temporal Dejitter
 
@@ -89,12 +86,11 @@ This is controlled by `dejitter=True` (default) and `dejitter_period=6` on `MACE
 
 ## Timing Log
 
-`model.recon(parallel=True, log_dir="./output/logs")` writes two files. `run_info.txt` is a human-readable summary of the run settings (the model writes its section; the calling script appends dataset and preprocessing settings). `timing_log.csv` has one row per MACE iteration:
+`model.recon(log_dir="./output/logs")` writes three files. `task_log.csv` has one row per task (iteration, kind, index, device, start, end). `run_info.txt` is a human-readable summary of the run settings (the model writes its section; the calling script appends dataset and preprocessing settings). `timing_log.csv` has one row per MACE iteration:
 
 ```
-iteration, agent_0_forward_sec, agent_1_prior_xyt_sec,
-agent_2_prior_yzt_sec, agent_3_prior_xzt_sec, iteration_total_sec,
-consensus_change_pct
+iteration, prox_total_sec, denoise_total_sec, makespan_sec,
+iteration_total_sec, consensus_change_pct
 ```
 
 `consensus_change_pct` is the relative change of the consensus average between iterations, the convergence measure. With `log_dir=None` (the default) no log files are written.

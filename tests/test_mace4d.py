@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from mace4d import (
     MACE4DModel,
     construct_time_frames,
+    _assign_tasks,
     _batched_hyperplane_denoise,
     _configure_denoiser,
     _dejitter_4d_dct,
@@ -22,6 +23,7 @@ from mace4d import (
     _denoiser_wrapper,
     _get_qggmrf_denoiser,
     _normalize_prior_weights,
+    _DENOISE_COST_PER_PLANE,
     _DENOISE_MAX_ITERATIONS,
     _DENOISE_STOP_THRESHOLD_PCT,
 )
@@ -52,15 +54,29 @@ def small_model():
     return model
 
 
+def _smooth_sino(num_views=NUM_VIEWS, rows=8, cols=10):
+    """A smooth, positive synthetic sinogram. A random sinogram reconstructs
+    into a volume with extreme values on which the qGGMRF line search can hit
+    0/0 for some randomly drawn pixel partitions."""
+    v = np.linspace(-1.0, 1.0, rows)
+    c = np.linspace(-1.0, 1.0, cols)
+    base = np.exp(-(v[:, None] ** 2 + c[None, :] ** 2))
+    a = np.arange(num_views)
+    return np.stack([base * (1.0 + 0.1 * np.sin(0.5 * ai)) for ai in a]).astype(np.float32)
+
+
 @pytest.fixture(scope="module")
 def small_sino():
-    rng = np.random.default_rng(0)
-    return rng.uniform(size=(NUM_VIEWS, 8, 10)).astype(np.float32)
+    return _smooth_sino()
 
 
 # ---------------------------------------------------------------------------
 # construct_time_frames
 # ---------------------------------------------------------------------------
+
+def test_smooth_sino_shape():
+    assert _smooth_sino().shape == (NUM_VIEWS, 8, 10)
+
 
 def test_frame_count_and_views(small_model, small_sino):
     # 120 degree frames advancing 60 degrees: views 0-7, 4-11, 8-15, 12-19, 16-23.
@@ -130,6 +146,54 @@ def test_prior_weights_scalar_and_list():
 def test_prior_weights_invalid_raises(bad):
     with pytest.raises(ValueError):
         _normalize_prior_weights(bad)
+
+
+# ---------------------------------------------------------------------------
+# Task assignment
+# ---------------------------------------------------------------------------
+
+def test_assign_tasks_balance():
+    plane_counts = [192, 65, 65]
+    frame_device, orient_device = _assign_tasks(25, plane_counts, 4)
+    assert len(frame_device) == 25 and len(orient_device) == 3
+    assert set(frame_device) | set(orient_device) <= {0, 1, 2, 3}
+    # The three denoise tasks land on three different devices.
+    assert len(set(orient_device)) == 3
+    # Device loads (prox = 1, denoise = cost) end up within one prox task.
+    loads = [0.0] * 4
+    for k, d in enumerate(orient_device):
+        loads[d] += _DENOISE_COST_PER_PLANE * plane_counts[k]
+    for d in frame_device:
+        loads[d] += 1.0
+    assert max(loads) - min(loads) <= 1.0 + 1e-9
+
+
+def test_assign_tasks_single_device():
+    frame_device, orient_device = _assign_tasks(5, [8, 6, 7], 1)
+    assert frame_device == [0] * 5
+    assert orient_device == [0] * 3
+
+
+# ---------------------------------------------------------------------------
+# End-to-end recon (serial path, one CPU device)
+# ---------------------------------------------------------------------------
+
+def test_recon_serial_end_to_end(small_model, small_sino, tmp_path):
+    sino_frames, model_frames = construct_time_frames(
+        small_sino, small_model,
+        angle_span_per_frame=np.radians(120.0), angle_stride=np.radians(60.0))
+    # dejitter=False: a period-6 filter on a 3-frame time axis would zero
+    # the whole temporal spectrum in this tiny test problem.
+    m = MACE4DModel(sino_frames[:3], model_frames[:3], max_mace_itr=1,
+                    dejitter=False, verbose=0)
+    out = m.recon(devices=1, init_dir=str(tmp_path / "init"), log_dir=str(tmp_path / "logs"))
+    assert out.shape == m._expected_init_shape()
+    assert np.all(np.isfinite(out))
+    for name in ("run_info.txt", "timing_log.csv", "task_log.csv"):
+        assert (tmp_path / "logs" / name).exists()
+    # Second call must hit the init cache.
+    out2 = m.recon(devices=1, init_dir=str(tmp_path / "init"))
+    assert out2.shape == out.shape
 
 
 # ---------------------------------------------------------------------------
