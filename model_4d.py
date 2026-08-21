@@ -31,6 +31,14 @@ from utils import (
     normalize_prior_weights,
 )
 
+# Prior-agent hyperplane orientations. The permutation moves the hyperplane
+# axis first; recon axes are (t, x, y, z).
+PRIOR_ORIENTATIONS = [
+    ("XY-t", (3, 0, 1, 2)),  # nz hyperplanes of shape (nt, nx, ny)
+    ("YZ-t", (1, 0, 2, 3)),  # nx hyperplanes of shape (nt, ny, nz)
+    ("XZ-t", (2, 0, 1, 3)),  # ny hyperplanes of shape (nt, nx, nz)
+]
+
 
 class MACE4DModel:
     """
@@ -226,22 +234,18 @@ class MACE4DModel:
         # ── Sigma precomputation (one-time, device-pinned) ────────────────────
         if verbose:
             print("[MACE] Precomputing sigma lists...")
-        sigma_xyt = estimate_sigma_per_hyperplane(
-            np.transpose(init_image, (3, 0, 1, 2)), device=devices[device_indices[1]]
-        )
-        sigma_yzt = estimate_sigma_per_hyperplane(
-            np.transpose(init_image, (1, 0, 2, 3)), device=devices[device_indices[2]]
-        )
-        sigma_xzt = estimate_sigma_per_hyperplane(
-            np.transpose(init_image, (2, 0, 1, 3)), device=devices[device_indices[3]]
-        )
-        if verbose:
-            print(
-                "[MACE] Nonzero sigma counts: "
-                f"XY-t={np.count_nonzero(sigma_xyt > 1e-6)}/{sigma_xyt.size}, "
-                f"YZ-t={np.count_nonzero(sigma_yzt > 1e-6)}/{sigma_yzt.size}, "
-                f"XZ-t={np.count_nonzero(sigma_xzt > 1e-6)}/{sigma_xzt.size}"
+        sigma_lists = [
+            estimate_sigma_per_hyperplane(
+                np.transpose(init_image, perm), device=devices[device_indices[k + 1]]
             )
+            for k, (_, perm) in enumerate(PRIOR_ORIENTATIONS)
+        ]
+        if verbose:
+            counts = ", ".join(
+                f"{name}={np.count_nonzero(s > 1e-6)}/{s.size}"
+                for (name, _), s in zip(PRIOR_ORIENTATIONS, sigma_lists)
+            )
+            print(f"[MACE] Nonzero sigma counts: {counts}")
             print("[MACE] Sigma precomputation done.")
 
         # ── MACE state (all on CPU / NumPy) ───────────────────────────────────
@@ -268,7 +272,7 @@ class MACE4DModel:
 
         # ── Agent closures ─────────────────────────────────────────────────────
         # Closures capture: devices, device_indices, sino_list, weights_list,
-        # models, sigma_*, sigma_p, nt, self.*. They are submitted to the
+        # models, sigma_lists, sigma_p, nt, self.*. They are submitted to the
         # ThreadPoolExecutor below; each runs on its own OS thread.
 
         def run_forward_agent(W_k, X_prev, device_index):
@@ -300,8 +304,8 @@ class MACE4DModel:
                 print(f"[MACE]  Agent 0 ran on {device} in {agent_sec:.2f} sec.")
             return out, agent_sec
 
-        def run_prior_agent_1(W_k, device_index):
-            """Agent 1: qGGMRF XY-t hyperplanes (fixed z slabs)."""
+        def run_prior_agent(W_k, device_index, permute_vector, sigma_list, agent_name):
+            """Prior agent: qGGMRF denoising of one hyperplane orientation."""
             device = devices[device_index]
             agent_t0 = time.time()
             if self.dejitter:
@@ -310,42 +314,10 @@ class MACE4DModel:
                     harmonics=True, band_width=1,
                     chunk_size=None, dtype=np.float32, verbose=bool(verbose),
                 )
-            out = denoiser_wrapper(W_k, permute_vector=(3, 0, 1, 2), sigma_list=sigma_xyt, device=device)
+            out = denoiser_wrapper(W_k, permute_vector=permute_vector, sigma_list=sigma_list, device=device)
             agent_sec = time.time() - agent_t0
             if verbose:
-                print(f"[MACE]  Agent 1 ran on {device} in {agent_sec:.2f} sec.")
-            return out, agent_sec
-
-        def run_prior_agent_2(W_k, device_index):
-            """Agent 2: qGGMRF YZ-t hyperplanes (fixed row slabs)."""
-            device = devices[device_index]
-            agent_t0 = time.time()
-            if self.dejitter:
-                W_k = dejitter_4d_dct(
-                    W_k, period=self.dejitter_period,
-                    harmonics=True, band_width=1,
-                    chunk_size=None, dtype=np.float32, verbose=bool(verbose),
-                )
-            out = denoiser_wrapper(W_k, permute_vector=(1, 0, 2, 3), sigma_list=sigma_yzt, device=device)
-            agent_sec = time.time() - agent_t0
-            if verbose:
-                print(f"[MACE]  Agent 2 ran on {device} in {agent_sec:.2f} sec.")
-            return out, agent_sec
-
-        def run_prior_agent_3(W_k, device_index):
-            """Agent 3: qGGMRF XZ-t hyperplanes (fixed col slabs)."""
-            device = devices[device_index]
-            agent_t0 = time.time()
-            if self.dejitter:
-                W_k = dejitter_4d_dct(
-                    W_k, period=self.dejitter_period,
-                    harmonics=True, band_width=1,
-                    chunk_size=None, dtype=np.float32, verbose=bool(verbose),
-                )
-            out = denoiser_wrapper(W_k, permute_vector=(2, 0, 1, 3), sigma_list=sigma_xzt, device=device)
-            agent_sec = time.time() - agent_t0
-            if verbose:
-                print(f"[MACE]  Agent 3 ran on {device} in {agent_sec:.2f} sec.")
+                print(f"[MACE]  Prior agent {agent_name} ran on {device} in {agent_sec:.2f} sec.")
             return out, agent_sec
 
         # ── Main MACE loop ─────────────────────────────────────────────────────
@@ -361,10 +333,11 @@ class MACE4DModel:
             with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
                 futures = {
                     pool.submit(run_forward_agent, W_snap[0], X[0], device_indices[0]): (0, "forward"),
-                    pool.submit(run_prior_agent_1, W_snap[1], device_indices[1]): (1, "prior XY-t"),
-                    pool.submit(run_prior_agent_2, W_snap[2], device_indices[2]): (2, "prior YZ-t"),
-                    pool.submit(run_prior_agent_3, W_snap[3], device_indices[3]): (3, "prior XZ-t"),
                 }
+                for k, (name, perm) in enumerate(PRIOR_ORIENTATIONS, start=1):
+                    fut = pool.submit(run_prior_agent, W_snap[k], device_indices[k],
+                                      perm, sigma_lists[k - 1], name)
+                    futures[fut] = (k, f"prior {name}")
                 for fut in concurrent.futures.as_completed(futures):
                     agent_id, agent_name = futures[fut]
                     done_t0 = time.time()
@@ -458,9 +431,10 @@ class MACE4DModel:
 
         if verbose:
             print("[MACE] Precomputing sigma lists...")
-        sigma_xyt = estimate_sigma_per_hyperplane(np.transpose(init_image, (3, 0, 1, 2)), device=device)
-        sigma_yzt = estimate_sigma_per_hyperplane(np.transpose(init_image, (1, 0, 2, 3)), device=device)
-        sigma_xzt = estimate_sigma_per_hyperplane(np.transpose(init_image, (2, 0, 1, 3)), device=device)
+        sigma_lists = [
+            estimate_sigma_per_hyperplane(np.transpose(init_image, perm), device=device)
+            for _, perm in PRIOR_ORIENTATIONS
+        ]
         if verbose:
             print("[MACE] Sigma precomputation done.")
 
@@ -494,13 +468,13 @@ class MACE4DModel:
                 )
 
             # Prior agents
-            W1 = dejitter_4d_dct(W[1], period=self.dejitter_period, harmonics=True, band_width=1, dtype=np.float32, verbose=bool(verbose)) if self.dejitter else W[1]
-            W2 = dejitter_4d_dct(W[2], period=self.dejitter_period, harmonics=True, band_width=1, dtype=np.float32, verbose=bool(verbose)) if self.dejitter else W[2]
-            W3 = dejitter_4d_dct(W[3], period=self.dejitter_period, harmonics=True, band_width=1, dtype=np.float32, verbose=bool(verbose)) if self.dejitter else W[3]
-
-            X[1] = denoiser_wrapper(W1, permute_vector=(3, 0, 1, 2), sigma_list=sigma_xyt, device=device)
-            X[2] = denoiser_wrapper(W2, permute_vector=(1, 0, 2, 3), sigma_list=sigma_yzt, device=device)
-            X[3] = denoiser_wrapper(W3, permute_vector=(2, 0, 1, 3), sigma_list=sigma_xzt, device=device)
+            for k, (_, perm) in enumerate(PRIOR_ORIENTATIONS, start=1):
+                W_in = dejitter_4d_dct(
+                    W[k], period=self.dejitter_period, harmonics=True,
+                    band_width=1, dtype=np.float32, verbose=bool(verbose),
+                ) if self.dejitter else W[k]
+                X[k] = denoiser_wrapper(W_in, permute_vector=perm,
+                                        sigma_list=sigma_lists[k - 1], device=device)
 
             # ADMM consensus
             z = sum(beta[k] * (2.0 * X[k] - W[k]) for k in range(4))
