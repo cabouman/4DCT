@@ -154,12 +154,46 @@ and audit host RAM before a full-scale run (W, X, and temporaries exceed
 **Verification.**  Exact reproduction is not possible: mbirjax draws its VCD
 pixel partitions from numpy's global random generator, so runs already
 differ, and thread interleaving adds more variation.  Acceptance is
-therefore: (a) a CPU test that forces several virtual devices
-(XLA_FLAGS=--xla_force_host_platform_device_count=4) and checks 1-worker
-against 4-worker agreement on a tiny problem with seeded, pre-generated
-partitions; (b) at smoke scale, agreement with the current code within its
-own measured run-to-run spread, plus a visual check.  Expected iteration
-time at smoke scale: about 7 s of GPU work plus about 1 s of host work,
-so roughly 8-9 s per iteration versus 23 s now.  Judge from iteration 2
-onward; iteration 1 pays the compilations.
+therefore: (a) the fast CPU test suite, including an end-to-end serial recon
+(a tiny multi-device CPU test was tried and removed: at toy problem sizes the
+qGGMRF line search can hit 0/0 for some random partitions, so the test failed
+for reasons unrelated to the queue); (b) at smoke scale, agreement with the
+previous code within its run-to-run spread, plus a visual check.
+
+**Measured outcome (smoke scale, 4 H100s, job 15421967, 2026-08-21).**
+Iteration time fell from 22 s (fixed agents, batched denoisers) to 14.4 s
+steady state; iteration 1 was 36 s (compilations).  Consensus-change values
+matched the previous run within run-to-run spread, and the GIF passed visual
+check.  The load balance is as designed: makespan is within about 1 s of
+prox_total / 4.  The gap to the 8-9 s estimate has a measured cause: each
+prox task takes 1.9-2.2 s when four run concurrently, versus about 0.85 s
+alone in the previous run — contention, most likely host-side (GIL during
+array staging, or PCIe), not scheduling.  Candidate next steps if it matters:
+profile the host staging path (pre-pinned transfer buffers, overlapped
+host-to-device copies).  Re-evaluate at full resolution first: the GPU
+compute per task is much larger there, so the fixed host overhead may become
+irrelevant.  Day total at smoke scale: 132 s per iteration at the start,
+14.4 s now.
+
+**Smoke-run comparison (25 frames, 8x4 downsampling, 4 MACE iterations,
+4 H100s, 2026-08-21).**
+
+| | smoke1 | smoke2 | smoke3 |
+|---|---|---|---|
+| Commit / code | `070f849` fixed agents, serial denoisers | `43cc6f2` batched denoisers | `4b8e85c` GPU task queue |
+| Denoiser sigma | per-hyperplane (1,248 estimates) | global, 0.00747 | global, 0.00747 |
+| Initialization | computed (~13 min) | cached | cached |
+| **Iteration time, steady state** | **~132 s** | **~22 s** | **~14.4 s** |
+| Iteration 1 (with compiles) | 131 s | 38 s | 36 s |
+| Forward / prox per iteration | 39 s (serial, 1 GPU) | 21-22 s (serial, 1 GPU) | 13.4 s makespan (25 tasks on 4 GPUs) |
+| Denoise per iteration | 132 / 34 / 34 s (XY/YZ/XZ) | 2.5 / 1.3 / 1.3 s | 2.9 s total |
+| Consensus change, iterations 2-4 | not logged yet | 12.6 / 11.6 / 11.4 % | 12.7 / 14.0 / 11.9 % |
+| Total wall time | 15.6 min | 1.9 min | 1.4 min |
+| Exit code | 0 | 0 | 0 |
+
+Notes: smoke1's wall time includes computing the initialization the other two
+reused, so the iteration-time row is the honest speed comparison.  smoke1's
+reconstruction is not numerically comparable to the other two (per-hyperplane
+vs global sigma is an intentional algorithm change); smoke2 vs smoke3 agree
+within run-to-run spread.
 
