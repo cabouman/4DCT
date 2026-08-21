@@ -4,10 +4,10 @@
 
 ## Quick Start (Lilly)
 
-Edit `DATA_PATH` in `test_script_4D.sh` to point to your extracted NSI dataset, then:
+Edit `DATA_PATH` in `demo_4d.sh` to point to your extracted NSI dataset, then:
 
 ```bash
-bash test_script_4D.sh
+bash demo_4d.sh
 ```
 
 Output is written to `./output/`:
@@ -22,9 +22,8 @@ On a second run with the same settings, the saved initialization in `output/init
 
 ```
 4DCT/
-├── test_script_4D.sh     # shell entry point — edit DATA_PATH and run
-├── Lilly_recon.py        # production CLI script (few argparse flags)
-├── dev_recon.py          # dev/exploration script (all params as Python variables)
+├── demo_4d.sh            # shell entry point — edit DATA_PATH and run
+├── recon_4d.py           # command-line reconstruction driver (all params as flags)
 ├── model_4d.py           # MACE4DModel class (serial + multi-GPU)
 ├── utils.py              # shared utilities (time-frame construction, dejitter, denoiser helpers)
 ├── plans/
@@ -39,9 +38,8 @@ The original serial and multi-GPU implementations (`4DMACE_serial/`, `4DMACE_mul
 
 | File | Purpose |
 |------|---------|
-| `test_script_4D.sh` | Shell entry point. Edit `DATA_PATH`; everything else has sensible defaults. |
-| `Lilly_recon.py` | Production script. Minimal CLI: data path, downsampling, frame params, iteration count. Algorithmic hyperparameters are fixed. |
-| `dev_recon.py` | Dev script. All parameters are Python variables at the top. Supports `USE_SAVED_INIT_IMAGE`, `parallel`, `time_range`, custom `device_indices`, etc. |
+| `demo_4d.sh` | Shell entry point. Edit `DATA_PATH`; everything else has sensible defaults. |
+| `recon_4d.py` | Reconstruction driver. Every parameter is a CLI flag with a validated default: data path, downsampling, frame geometry, MACE hyperparameters, execution mode (`--serial`, `--device_indices`). |
 | `model_4d.py` | `MACE4DModel` class. Call `model.recon(parallel=True)` for multi-GPU or `model.recon(parallel=False)` for serial. |
 | `utils.py` | Stateless helpers shared by both modes: `construct_time_frames`, `dejitter_4d_dct`, denoiser utilities. |
 

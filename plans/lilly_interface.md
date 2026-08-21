@@ -1,20 +1,20 @@
-# Lilly Interface — `Lilly_recon.py`
+# Lilly Interface — `recon_4d.py`
 
-Entry point for Lilly production runs. Launched via `bash test_script_4D.sh` or directly as
-`python Lilly_recon.py --data_path <path>`.
+Entry point for Lilly production runs. Launched via `bash demo_4d.sh` or directly as
+`python recon_4d.py --data_path <path>`.
 
 ---
 
 ## Parameters Lilly needs to set
 
-### In `test_script_4D.sh`
+### In `demo_4d.sh`
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `DATA_PATH` | `/depot/bouman/data/Lilly/4DCT/Phantom_30s_Run1_Dec2024/` | Path to the extracted NSI dataset directory (must contain a `.nsipro` file) |
 | `OUTPUT_PATH` | `./output` | Directory for all outputs (recon `.npy`, init image, timing CSV) |
 
-### CLI flags (passed to `Lilly_recon.py`)
+### CLI flags (passed to `recon_4d.py`)
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -30,7 +30,25 @@ Entry point for Lilly production runs. Launched via `bash test_script_4D.sh` or 
 
 ---
 
-## Parameters fixed by us (not exposed to Lilly)
+## Advanced CLI flags (defaults are the validated values; Lilly normally leaves them alone)
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--prior_weight` | `0.5` | Total weight of the three prior agents (forward agent gets 1 − w) |
+| `--rho` | `0.5` | ADMM step size (Mann iteration parameter) |
+| `--num_prox_iterations` | `3` | Max prox_map iterations per MACE step |
+| `--stop_threshold` | `0.02` | Prox_map convergence threshold (% change) |
+| `--sharpness` | `1.0` | Sharpness parameter passed to `ct_model` |
+| `--sigma_p` | *(auto)* | Proximal sigma; omit for automatic selection |
+| `--no_dejitter` | *(off)* | Disables the DCT-I temporal dejitter |
+| `--serial` | *(off)* | Run agents sequentially on one device instead of 4 GPUs |
+| `--device_indices` | `0 1 2 3` | GPU assignment: `[forward, prior_xyt, prior_yzt, prior_xzt]` |
+| `--download_dir` | `./data` | Extraction directory when `--data_path` is a `.tgz` |
+| `--verbose` | `1` | 0 = silent, 1 = progress, 2 = debug |
+
+---
+
+## Derived parameters (not settable)
 
 ### Scan geometry — derived automatically
 
@@ -40,27 +58,7 @@ Entry point for Lilly production runs. Launched via `bash test_script_4D.sh` or 
 | `stride` | derived | `round(angle_stride / angle_step)` inside `construct_time_frames()`              |
 | `dejitter_period` | derived | `round(2π / angle_stride)` = 6 for 60° stride                                    |
 
-`angle_span_per_frame` and `angle_stride` are CLI flags in degrees (defaults 120° and 60°); internally all angles are radians.
-
-### MACE algorithm
-
-| Parameter | Value | Meaning |
-|---|---|---|
-| `prior_weight` | `0.5` | Weight split between forward agent (0.5) and three prior agents (0.5/3 each) |
-| `rho` | `0.5` | ADMM step size (Mann iteration parameter) |
-| `num_prox_iterations` | `3` | Max prox_map iterations per MACE step |
-| `stop_threshold` | `0.02` | Prox_map convergence threshold (% change) |
-| `weight_type` | `"transmission_root"` | Sinogram weighting scheme (default in `MACE4DModel`) |
-| `sigma_p` | `None` | Proximal sigma — `None` lets mbirjax choose automatically |
-| `sharpness` | `1.0` | Sharpness parameter passed to `ct_model` |
-| `dejitter` | `True` | DCT-I temporal dejitter applied inside each MACE agent |
-
-### Execution
-
-| Parameter | Value | Meaning |
-|---|---|---|
-| `parallel` | `True` | 4-GPU ThreadPoolExecutor mode (requires ≥4 GPUs) |
-| `device_indices` | `[0,1,2,3]` | GPU assignment: `[forward, prior_xyt, prior_yzt, prior_xzt]` |
+`angle_span_per_frame` and `angle_stride` are CLI flags in degrees (defaults 120° and 60°); internally all angles are radians. The sinogram weighting scheme is fixed at `"transmission_root"` (default in `MACE4DModel`).
 
 > **Slurm note (Magtrain cluster):** Always request 4 GPUs when submitting the job, e.g. `--gres=gpu:4`.
 

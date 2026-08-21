@@ -1,11 +1,11 @@
 #!/bin/bash
 #
-# 4D MACE CT Reconstruction — Lilly production run script.
+# 4D MACE CT Reconstruction — demo run script.
 #
 # Instructions:
 #   1. Set DATA_PATH to the extracted NSI dataset directory.
 #   2. Optionally adjust the flags below.
-#   3. Run:  bash test_script_4D.sh
+#   3. Run:  bash demo_4d.sh
 #
 
 
@@ -15,7 +15,7 @@ OUTPUT_PATH=./output
 mkdir -p "$OUTPUT_PATH"
 mkdir -p ~/4dct_logs/
 
-python Lilly_recon.py \
+python recon_4d.py \
   --data_path             "$DATA_PATH" \
   --output_path           "$OUTPUT_PATH" \
   --angle_span_per_frame  120.0 \
@@ -25,4 +25,4 @@ python Lilly_recon.py \
   --downsample_row        1 \
   --downsample_column     1 \
   --subsample_view_factor 1 \
-  2>&1 | tee ~/4dct_logs/lilly_run.log
+  2>&1 | tee ~/4dct_logs/recon_4d_run.log

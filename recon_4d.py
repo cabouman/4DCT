@@ -1,15 +1,14 @@
 """
-4D MACE CT Reconstruction — Lilly production script.
+4D MACE CT Reconstruction — command-line driver.
 
 Typical usage (via shell script):
-    bash test_script_4D.sh
+    bash demo_4d.sh
 
 Or directly:
-    python Lilly_recon.py --data_path /path/to/nsi/dataset
+    python recon_4d.py --data_path /path/to/nsi/dataset
 
-The algorithmic hyperparameters (prior_weight, rho, etc.) are fixed below and
-not exposed as CLI flags; they represent validated defaults for the 4DCT phantom
-dataset. Contact the development team before changing them.
+Every parameter is a CLI flag; the defaults are the validated values for the
+4DCT phantom dataset.
 """
 
 import os
@@ -40,10 +39,20 @@ if __name__ == "__main__":
         description="4D MACE CT Reconstruction",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    # Data and output
     parser.add_argument(
         "--data_path", type=str, required=True,
-        help="Path to the extracted NSI dataset directory.",
+        help="NSI dataset directory, or a .tgz path/URL to download and extract.",
     )
+    parser.add_argument(
+        "--download_dir", type=str, default="./data",
+        help="Extraction directory used when --data_path is a .tgz.",
+    )
+    parser.add_argument(
+        "--output_path", type=str, default="./output",
+        help="Directory for output files (recon, init cache, logs, GIF).",
+    )
+    # Preprocessing
     parser.add_argument(
         "--downsample_row", type=int, default=1,
         help="Detector row subsampling factor.",
@@ -57,6 +66,11 @@ if __name__ == "__main__":
         help="View subsampling factor.",
     )
     parser.add_argument(
+        "--sharpness", type=float, default=1.0,
+        help="mbirjax sharpness parameter.",
+    )
+    # Time frames
+    parser.add_argument(
         "--angle_span_per_frame", type=float, default=120.0,
         help="Angular span (degrees) covered by each time frame.",
     )
@@ -65,37 +79,67 @@ if __name__ == "__main__":
         help="Degrees advanced per frame step (= span - overlap).",
     )
     parser.add_argument(
+        "--num_frames", type=int, default=None,
+        help="Reconstruct only the first N time frames. Omit to use all frames.",
+    )
+    # MACE
+    parser.add_argument(
         "--max_mace_itr", type=int, default=10,
         help="Maximum number of outer MACE iterations.",
     )
     parser.add_argument(
-        "--output_path", type=str, default="./output",
-        help="Directory for output files (recon, init_image, timing log).",
+        "--prior_weight", type=float, default=0.5,
+        help="Total weight of the three prior agents.",
     )
     parser.add_argument(
-        "--num_frames", type=int, default=None,
-        help="Reconstruct only the first N time frames. Omit to use all frames.",
+        "--rho", type=float, default=0.5,
+        help="ADMM step size (Mann iteration parameter).",
+    )
+    parser.add_argument(
+        "--num_prox_iterations", type=int, default=3,
+        help="Max prox_map iterations per MACE step.",
+    )
+    parser.add_argument(
+        "--stop_threshold", type=float, default=0.02,
+        help="Prox_map convergence threshold.",
+    )
+    parser.add_argument(
+        "--sigma_p", type=float, default=None,
+        help="Proximal map sigma. Omit for automatic selection.",
+    )
+    parser.add_argument(
+        "--no_dejitter", action="store_true",
+        help="Disable the DCT-I temporal dejitter.",
+    )
+    # Execution
+    parser.add_argument(
+        "--serial", action="store_true",
+        help="Run the agents sequentially on one device instead of 4 GPUs.",
+    )
+    parser.add_argument(
+        "--device_indices", type=int, nargs=4, default=[0, 1, 2, 3],
+        metavar=("FWD", "XYT", "YZT", "XZT"),
+        help="GPU indices for the four agents (parallel mode).",
+    )
+    parser.add_argument(
+        "--verbose", type=int, default=1,
+        help="0 = silent, 1 = progress, 2 = debug.",
     )
     args = parser.parse_args()
 
-    # ── Validate inputs ────────────────────────────────────────────────────────
-    if not os.path.isdir(args.data_path):
-        raise FileNotFoundError(
-            f"--data_path does not exist or is not a directory: {args.data_path}"
-        )
+    # ── Resolve dataset ────────────────────────────────────────────────────────
+    # A directory is used as is; anything else is downloaded/extracted.
+    if os.path.isdir(args.data_path):
+        dataset_dir = args.data_path
+    else:
+        os.makedirs(args.download_dir, exist_ok=True)
+        dataset_dir = mj.download_and_extract(args.data_path, args.download_dir)
 
     output_path = args.output_path
     os.makedirs(output_path, exist_ok=True)
     init_dir = os.path.join(output_path, "init")
     log_dir = os.path.join(output_path, "logs")
 
-    # ── Fixed algorithmic hyperparameters ──────────────────────────────────────
-    sharpness = 1.0
-    prior_weight = 0.5
-    rho = 0.5
-    num_prox_iterations = 3
-    stop_threshold = 0.02
-    verbose = 1
     # CLI angles arrive in degrees; all computation is in radians.
     angle_span_per_frame = np.radians(args.angle_span_per_frame)
     angle_stride         = np.radians(args.angle_stride)
@@ -103,14 +147,13 @@ if __name__ == "__main__":
 
     # ── Preprocessing ──────────────────────────────────────────────────────────
     print("\n************** NSI dataset preprocessing **************")
-    downsample_rate = [args.downsample_row, args.downsample_column]
     sino, ct_model = mjp.nsi.get_sino_and_model(
-        args.data_path,
-        downsample_factor=downsample_rate,
+        dataset_dir,
+        downsample_factor=[args.downsample_row, args.downsample_column],
         subsample_view_factor=args.subsample_view_factor,
         auto_crop=True,
     )
-    ct_model.set_params(sharpness=sharpness, positivity_flag=True, verbose=verbose)
+    ct_model.set_params(sharpness=args.sharpness, positivity_flag=True, verbose=args.verbose)
 
     # ── Time frame construction ────────────────────────────────────────────────
     print("\n************** Construct time frames **************")
@@ -131,22 +174,25 @@ if __name__ == "__main__":
     model_4d = MACE4DModel(
         sino_list=sino_frames,
         model_list=model_frames,
-        prior_weight=prior_weight,
-        rho=rho,
+        prior_weight=args.prior_weight,
+        rho=args.rho,
         max_mace_itr=args.max_mace_itr,
-        num_prox_iterations=num_prox_iterations,
-        stop_threshold=stop_threshold,
+        num_prox_iterations=args.num_prox_iterations,
+        stop_threshold=args.stop_threshold,
+        sigma_p=args.sigma_p,
+        dejitter=not args.no_dejitter,
         dejitter_period=dejitter_period,
-        verbose=verbose,
+        verbose=args.verbose,
     )
 
     # ── Reconstruct ────────────────────────────────────────────────────────────
     print("\n************** Run 4D MACE reconstruction **************")
     time0 = time.time()
     recon_4d = model_4d.recon(
-        parallel=True,
+        parallel=not args.serial,
         init_dir=init_dir,
         log_dir=log_dir,
+        device_indices=args.device_indices,
     )
     run_time_h = (time.time() - time0) / 3600
 
@@ -157,13 +203,13 @@ if __name__ == "__main__":
     print(f"[INFO] Logs:           {os.path.abspath(log_dir)}")
 
     with open(os.path.join(log_dir, "run_info.txt"), "a") as f:
-        f.write("\n# Script settings (Lilly_recon.py)\n")
-        f.write(f"data_path            = {args.data_path}\n")
+        f.write("\n# Script settings (recon_4d.py)\n")
+        f.write(f"dataset              = {dataset_dir}\n")
         f.write(f"downsample (row, col) = ({args.downsample_row}, {args.downsample_column})\n")
         f.write(f"subsample_view_factor = {args.subsample_view_factor}\n")
         f.write(f"angle span / stride  = {args.angle_span_per_frame} deg / {args.angle_stride} deg\n")
         f.write(f"num_frames           = {len(sino_frames)}\n")
-        f.write(f"sharpness            = {sharpness}\n")
+        f.write(f"sharpness            = {args.sharpness}\n")
         f.write(f"total wall time      = {run_time_h:.2f} h\n")
         f.write(f"recon saved to       = {os.path.abspath(out_path)}\n")
 
