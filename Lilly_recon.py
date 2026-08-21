@@ -73,6 +73,10 @@ if __name__ == "__main__":
         help="Directory for output files (recon, init_image, timing log).",
     )
     parser.add_argument(
+        "--num_frames", type=int, default=None,
+        help="Reconstruct only the first N time bins. Omit to use all bins.",
+    )
+    parser.add_argument(
         "--resume", type=str, default=None, metavar="INIT_PATH",
         help="Path to a saved init_image.npy to skip per-bin initialization.",
     )
@@ -122,6 +126,9 @@ if __name__ == "__main__":
         stride=stride,
     )
     print(f"Total bins: {len(bins)}")
+    if args.num_frames is not None:
+        bins = bins[:args.num_frames]
+        print(f"Using first {len(bins)} bins (--num_frames={args.num_frames}).")
 
     sino_list = [b[0] for b in bins]
     model_list = [b[1] for b in bins]
