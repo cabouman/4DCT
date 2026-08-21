@@ -15,10 +15,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from mace4d import (
     MACE4DModel,
     construct_time_frames,
+    _batched_hyperplane_denoise,
+    _configure_denoiser,
     _dejitter_4d_dct,
+    _denoise_constants,
+    _denoiser_wrapper,
+    _get_qggmrf_denoiser,
     _normalize_prior_weights,
+    _DENOISE_MAX_ITERATIONS,
+    _DENOISE_STOP_THRESHOLD_PCT,
 )
 
+import jax
+import jax.numpy as jnp
 import mbirjax as mj
 
 
@@ -121,6 +130,44 @@ def test_prior_weights_scalar_and_list():
 def test_prior_weights_invalid_raises(bad):
     with pytest.raises(ValueError):
         _normalize_prior_weights(bad)
+
+
+# ---------------------------------------------------------------------------
+# Batched denoiser
+# ---------------------------------------------------------------------------
+
+def test_batched_denoise_equals_serial():
+    # The vmapped batch must reproduce per-volume denoising with the same
+    # shared constants, including lanes that converge at different iterations.
+    rng = np.random.default_rng(3)
+    x = (np.linspace(0, 1, 8 * 10 * 12).reshape(8, 10, 12)[None]
+         + 0.05 * rng.normal(size=(6, 8, 10, 12))).astype(np.float32)
+    device = jax.devices()[0]
+    den = _get_qggmrf_denoiser(x.shape[1:], device)
+    _configure_denoiser(den, sigma=0.05, image_for_stats=x.reshape(-1, 10, 12))
+
+    y_batched = _batched_hyperplane_denoise(x, den, device)
+
+    partition, fm_constant, qggmrf_params, image_shape = _denoise_constants(den)
+    stop_thresh = _DENOISE_STOP_THRESHOLD_PCT / 100.0
+    y_serial = np.empty_like(x)
+    for i in range(x.shape[0]):
+        flat = jnp.asarray(x[i].reshape(-1, x.shape[3]))
+        out, _, _, _ = den._denoise_single_device(
+            flat, jnp.zeros_like(flat), partition, fm_constant, qggmrf_params,
+            image_shape, _DENOISE_MAX_ITERATIONS, stop_thresh, 0)
+        y_serial[i] = np.asarray(out).reshape(x.shape[1:])
+
+    assert np.allclose(y_batched, y_serial, atol=1e-5)
+    assert not np.allclose(y_batched, x)   # denoising actually changed the volumes
+
+
+def test_denoiser_wrapper_shape_and_axes():
+    rng = np.random.default_rng(4)
+    x = rng.normal(size=(5, 6, 7, 8)).astype(np.float32)
+    device = jax.devices()[0]
+    y = _denoiser_wrapper(x, permute_vector=(3, 0, 1, 2), sigma=0.1, device=device)
+    assert y.shape == x.shape
 
 
 # ---------------------------------------------------------------------------

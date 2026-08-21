@@ -187,7 +187,10 @@ class MACE4DModel:
                 init_source = (f"computed ({self.nt} frames, "
                                f"{_INIT_MBIR_ITERATIONS} MBIR iterations each)")
 
-        sigma_lists = self._compute_sigma_lists(init_image, agent_devices)
+        # ── Global denoiser sigma (one value for all orientations) ─────────────
+        global_sigma = self._estimate_global_sigma(init_image, agent_devices[1])
+        if verbose:
+            print(f"[MACE] Global denoiser sigma = {global_sigma:.6g}")
 
         # ── MACE state (all on CPU / NumPy) ────────────────────────────────────
         W = [np.copy(init_image) for _ in range(4)]
@@ -197,7 +200,7 @@ class MACE4DModel:
         timing_log_path = None
         if log_dir is not None:
             os.makedirs(log_dir, exist_ok=True)
-            self._write_run_info(log_dir, parallel, agent_devices, init_source)
+            self._write_run_info(log_dir, parallel, agent_devices, init_source, global_sigma)
             timing_log_path = os.path.join(log_dir, "timing_log.csv")
             with open(timing_log_path, "w", newline="") as f:
                 csv.DictWriter(f, fieldnames=_TIMING_FIELDS).writeheader()
@@ -223,7 +226,7 @@ class MACE4DModel:
                     }
                     for k, (name, perm) in enumerate(_PRIOR_ORIENTATIONS, start=1):
                         fut = pool.submit(self._run_prior_agent, W[k], agent_devices[k],
-                                          perm, sigma_lists[k - 1], name)
+                                          perm, global_sigma, name)
                         futures[fut] = (k, f"prior {name}")
                     for fut in concurrent.futures.as_completed(futures):
                         agent_id, agent_name = futures[fut]
@@ -237,7 +240,7 @@ class MACE4DModel:
                 X[0], agent_times[0] = self._run_forward_agent(W[0], X[0], agent_devices[0])
                 for k, (name, perm) in enumerate(_PRIOR_ORIENTATIONS, start=1):
                     X[k], agent_times[k] = self._run_prior_agent(
-                        W[k], agent_devices[k], perm, sigma_lists[k - 1], name)
+                        W[k], agent_devices[k], perm, global_sigma, name)
 
             # ADMM consensus (CPU)
             z = sum(beta[k] * (2.0 * X[k] - W[k]) for k in range(4))
@@ -300,24 +303,12 @@ class MACE4DModel:
             print(f"[MACE] Pinned all {self.nt} ConeBeamModel instances to {agent_devices[0]}.")
         return agent_devices
 
-    def _compute_sigma_lists(self, init_image, agent_devices):
-        """Per-hyperplane noise sigmas for each prior orientation (one-time, device-pinned)."""
-        if self.verbose:
-            print("[MACE] Precomputing sigma lists...")
-        sigma_lists = [
-            _estimate_sigma_per_hyperplane(
-                np.transpose(init_image, perm), device=agent_devices[k + 1]
-            )
-            for k, (_, perm) in enumerate(_PRIOR_ORIENTATIONS)
-        ]
-        if self.verbose:
-            counts = ", ".join(
-                f"{name}={np.count_nonzero(s > 1e-6)}/{s.size}"
-                for (name, _), s in zip(_PRIOR_ORIENTATIONS, sigma_lists)
-            )
-            print(f"[MACE] Nonzero sigma counts: {counts}")
-            print("[MACE] Sigma precomputation done.")
-        return sigma_lists
+    def _estimate_global_sigma(self, init_image, device):
+        """One global noise sigma for all denoising, estimated from the init image."""
+        # Merge (nt, nx) so the estimator sees a 3D array; it subsamples internally.
+        image_3d = init_image.reshape(-1, init_image.shape[2], init_image.shape[3])
+        denoiser = _get_qggmrf_denoiser(image_3d.shape, device)
+        return float(denoiser.estimate_image_noise_std(image_3d))
 
     def _run_forward_agent(self, W_k, X_prev, device):
         """Agent 0: cone-beam prox_map, one time frame at a time, on one device."""
@@ -342,11 +333,11 @@ class MACE4DModel:
             print(f"[MACE]  Forward agent ran on {device} in {agent_sec:.2f} sec.")
         return out, agent_sec
 
-    def _run_prior_agent(self, W_k, device, permute_vector, sigma_list, agent_name):
-        """Prior agent: qGGMRF denoising of one hyperplane orientation."""
+    def _run_prior_agent(self, W_k, device, permute_vector, sigma, agent_name):
+        """Prior agent: batched qGGMRF denoising of one hyperplane orientation."""
         agent_t0 = time.time()
         out = _denoiser_wrapper(self._dejitter(W_k), permute_vector=permute_vector,
-                               sigma_list=sigma_list, device=device)
+                               sigma=sigma, device=device)
         agent_sec = time.time() - agent_t0
         if self.verbose:
             print(f"[MACE]  Prior agent {agent_name} ran on {device} in {agent_sec:.2f} sec.")
@@ -360,7 +351,7 @@ class MACE4DModel:
                                band_width=1, dtype=np.float32,
                                verbose=bool(self.verbose))
 
-    def _write_run_info(self, log_dir, parallel, agent_devices, init_source):
+    def _write_run_info(self, log_dir, parallel, agent_devices, init_source, global_sigma):
         """Write a human-readable summary of the run settings to run_info.txt."""
         try:
             from importlib.metadata import version
@@ -385,6 +376,7 @@ class MACE4DModel:
             f"num_prox_iterations  = {self.num_prox_iterations}",
             f"stop_threshold       = {self.stop_threshold}",
             f"sigma_p              = {'auto' if self.sigma_p is None else self.sigma_p}",
+            f"denoiser sigma (global) = {global_sigma:.6g}",
             f"dejitter             = {self.dejitter}, period {self.dejitter_period}",
         ]
         with open(os.path.join(log_dir, "run_info.txt"), "w") as f:
@@ -642,69 +634,116 @@ def _get_qggmrf_denoiser(shape, device):
     return cache[key]
 
 
-def _estimate_sigma_per_hyperplane(x, device, sigma_noise_floor=1e-6):
+# Denoiser iteration settings (match the old per-volume denoise() defaults).
+_DENOISE_MAX_ITERATIONS = 15
+_DENOISE_STOP_THRESHOLD_PCT = 0.2
+
+# Working-set multiplier for the batch-size estimate: bytes used per volume
+# during the jitted sweep, as a multiple of the volume size. Heuristic; refine
+# by measurement on the target GPU.
+_DENOISE_BUFFER_MULTIPLIER = 16
+
+
+def _configure_denoiser(denoiser, sigma, image_for_stats):
+    """Set the shared sigma and the regularization constants on the denoiser.
+
+    Replicates the parameter setup that QGGMRFDenoiser.denoise() performs, so
+    the jitted sweep can be called directly with shared constants.
     """
-    Estimate one noise sigma per hyperplane slice.
+    denoiser.set_params(use_ror_mask=False, sigma_noise=float(sigma))
+    verbose = denoiser.get_params('verbose')
+    denoiser.set_params(verbose=0)
+    denoiser.auto_set_regularization_params(image_for_stats)
+    denoiser.set_params(verbose=verbose)
+    # The sweep's progress callback converts its arguments with int()/float(),
+    # which fails on the batched arrays a vmapped sweep passes it; silence it.
+    denoiser._log_denoise_progress = lambda *args: None
+    # Recompute the sweep constants for this configuration. The pixel partition
+    # is random per generation, so it must be built once here and reused —
+    # otherwise repeated calls run different VCD subset orders.
+    denoiser._mace4d_constants = None
+    _denoise_constants(denoiser)
+
+
+def _denoise_constants(denoiser):
+    """The constant arguments of the denoiser's jitted sweep, cached per configuration."""
+    cached = getattr(denoiser, '_mace4d_constants', None)
+    if cached is not None:
+        return cached
+    image_shape, granularity = denoiser.get_params(['recon_shape', 'granularity'])
+    partition = mj.gen_set_of_pixel_partitions(image_shape, [granularity[0]],
+                                               use_ror_mask=False)[0]
+    fm_constant = 1.0 / (denoiser.get_params('sigma_y') ** 2.0)
+    qggmrf_nbr_wts, sigma_x, p, q, T = denoiser.get_params(
+        ['qggmrf_nbr_wts', 'sigma_x', 'p', 'q', 'T'])
+    qggmrf_params = (mj.get_b_from_nbr_wts(qggmrf_nbr_wts), sigma_x, p, q, T)
+    denoiser._mace4d_constants = (partition, fm_constant, qggmrf_params, image_shape)
+    return denoiser._mace4d_constants
+
+
+def _auto_batch_size(vol_shape, device):
+    """Largest volume batch that fits in device memory; a small fixed batch on CPU."""
+    stats = getattr(device, 'memory_stats', lambda: None)()
+    if not stats:
+        return 4
+    free = stats.get('bytes_limit', 0) - stats.get('bytes_in_use', 0)
+    vol_bytes = 4 * int(np.prod(vol_shape))
+    return max(1, int(0.5 * free) // (_DENOISE_BUFFER_MULTIPLIER * vol_bytes))
+
+
+def _batched_hyperplane_denoise(x, denoiser, device):
+    """
+    Denoise a stack of same-shaped 3D volumes with shared, preconfigured settings.
+
+    One jax.vmap call runs the denoiser's single-device jitted sweep over a
+    whole batch, so the GPU is filled instead of processing volumes one at a
+    time (plan: Optimization Step 1). The volumes are independent, so the
+    result equals per-volume denoising with the same constants.
 
     Parameters
     ----------
-    x : ndarray, shape (num_hyperplanes, dim1, dim2)
-    device : jax device
-        The denoiser is pinned to this device.
-
-    Returns
-    -------
-    sigma_list : ndarray, shape (num_hyperplanes,), dtype float32
-    """
-    denoiser = _get_qggmrf_denoiser(x.shape[1:], device)
-    sigma_list = np.empty(x.shape[0], dtype=np.float32)
-    for i in range(x.shape[0]):
-        sigma_use = denoiser.estimate_image_noise_std(x[i][:, ::4, ::4])
-        if (not np.isfinite(sigma_use)) or (sigma_use <= sigma_noise_floor):
-            sigma_use = 0.0
-        sigma_list[i] = sigma_use
-    return sigma_list
-
-
-def _qggmrf_hyperplane_denoise(x, sigma_list, device, sigma_noise_floor=1e-6):
-    """
-    Denoise a stack of hyperplane slices on a single JAX device.
-
-    Parameters
-    ----------
-    x : ndarray, shape (num_hyperplanes, dim1, dim2)
-    sigma_list : ndarray, shape (num_hyperplanes,)
+    x : ndarray, shape (num_volumes, d0, d1, d2)
+    denoiser : QGGMRFDenoiser for shape (d0, d1, d2), after _configure_denoiser.
     device : jax device
 
     Returns
     -------
     y : ndarray, same shape as x
     """
+    num_vols, vol_shape = x.shape[0], x.shape[1:]
+    partition, fm_constant, qggmrf_params, image_shape = _denoise_constants(denoiser)
+    stop_thresh = _DENOISE_STOP_THRESHOLD_PCT / 100.0
+
+    def denoise_one(flat_vol):
+        out, _, _, _ = denoiser._denoise_single_device(
+            flat_vol, jnp.zeros_like(flat_vol), partition, fm_constant,
+            qggmrf_params, image_shape, _DENOISE_MAX_ITERATIONS, stop_thresh, 0)
+        return out
+
+    batch = _auto_batch_size(vol_shape, device)
+    flat = x.reshape(num_vols, -1, vol_shape[-1])
     y = np.empty_like(x)
     with jax.default_device(device):
-        denoiser = _get_qggmrf_denoiser(x.shape[1:], device)
-        for i in range(x.shape[0]):
-            sigma_use = sigma_list[i]
-            if (not np.isfinite(sigma_use)) or (sigma_use <= sigma_noise_floor):
-                y[i] = x[i]
-            else:
-                image_i = jax.device_put(jnp.asarray(x[i]), device)
-                y_i, _ = denoiser.denoise(image=image_i, sigma_noise=sigma_use)
-                y[i] = np.asarray(y_i)
+        for b0 in range(0, num_vols, batch):
+            b1 = min(b0 + batch, num_vols)
+            block = jax.device_put(jnp.asarray(flat[b0:b1]), device)
+            out = jax.vmap(denoise_one)(block)
+            y[b0:b1] = np.asarray(out).reshape((b1 - b0,) + vol_shape)
     return y
 
 
-def _denoiser_wrapper(x, permute_vector, sigma_list, device):
+def _denoiser_wrapper(x, permute_vector, sigma, device):
     """
-    Permute a 4D volume, denoise the resulting hyperplane stack, then unpermute.
+    Permute a 4D volume so the hyperplane axis is first, batch-denoise the
+    resulting stack of 3D volumes at the shared global sigma, then unpermute.
 
     Parameters
     ----------
     x : ndarray, shape (nt, nx, ny, nz)
     permute_vector : tuple of int
         Permutation that puts the hyperplane axis first.
-    sigma_list : ndarray
-        Per-hyperplane noise sigmas (from _estimate_sigma_per_hyperplane).
+    sigma : float
+        Global noise sigma shared by every volume.
     device : jax device
         Device on which denoising runs.
 
@@ -712,8 +751,12 @@ def _denoiser_wrapper(x, permute_vector, sigma_list, device):
     -------
     y : ndarray, same shape as x
     """
-    x_perm = np.transpose(x, permute_vector)
-    y_perm = _qggmrf_hyperplane_denoise(x_perm, sigma_list=sigma_list, device=device)
+    x_perm = np.ascontiguousarray(np.transpose(x, permute_vector))
+    denoiser = _get_qggmrf_denoiser(x_perm.shape[1:], device)
+    # Regularization statistics come from the whole stack (merged to 3D), so
+    # every orientation sees the same voxel population.
+    _configure_denoiser(denoiser, sigma, x_perm.reshape(-1, *x_perm.shape[2:]))
+    y_perm = _batched_hyperplane_denoise(x_perm, denoiser, device)
     inv_perm = np.argsort(permute_vector)
     return np.transpose(y_perm, inv_perm)
 
