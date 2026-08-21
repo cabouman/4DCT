@@ -3,7 +3,7 @@
 
 Edit the parameter blocks below before each run. Unlike Lilly_recon.py, all
 hyperparameters are directly accessible as Python variables. Toggle
-USE_SAVED_INIT_IMAGE to skip the slow per-bin initialization step on
+USE_SAVED_INIT_IMAGE to skip the slow per-frame initialization step on
 repeated runs against the same dataset.
 """
 
@@ -25,7 +25,7 @@ import mbirjax.preprocess as mjp
 import numpy as np
 
 from model_4d import MACE4DModel
-from utils import truncate_sino_into_time_bins, compute_bin_params, gen_gif_and_save
+from utils import construct_time_frames, compute_frame_params, gen_gif_and_save
 
 if __name__ == "__main__":
 
@@ -65,27 +65,26 @@ if __name__ == "__main__":
     )
     ct_model.set_params(sharpness=sharpness, verbose=verbose, positivity_flag=True)
 
-    # ── Time bin splitting ─────────────────────────────────────────────────────
-    angle_span_per_recon = 120.0   # degrees covered per time bin
-    angle_overlapping    = 60.0    # degrees of overlap between bins
-    angle_advancing = angle_span_per_recon - angle_overlapping  # degrees advanced per bin step
+    # ── Time frame construction ────────────────────────────────────────────────
+    angle_span_per_recon = 120.0   # degrees covered per time frame
+    angle_overlapping    = 60.0    # degrees of overlap between frames
+    angle_advancing = angle_span_per_recon - angle_overlapping  # degrees advanced per frame step
     dejitter_period = int(round(360.0 / angle_advancing))  # period of the jitter introduced by sinogram gating
 
-    views_per_bin, stride = compute_bin_params(dataset_dir, angle_span_per_recon, angle_advancing)
+    views_per_frame, stride = compute_frame_params(dataset_dir, angle_span_per_recon, angle_advancing)
 
     time_range = slice(0, -1)
 
-    print("\n************** Split into time bins **************")
-    bins = truncate_sino_into_time_bins(
+    print("\n************** Construct time frames **************")
+    sino_frames, model_frames = construct_time_frames(
         sino=sino,
         model=ct_model,
-        views_per_bin=views_per_bin,
+        views_per_frame=views_per_frame,
         stride=stride,
-    )[time_range]
-    print(f"Total bins: {len(bins)}")
-
-    sino_list = [b[0] for b in bins]
-    model_list = [b[1] for b in bins]
+    )
+    sino_frames = sino_frames[time_range]
+    model_frames = model_frames[time_range]
+    print(f"Total frames: {len(sino_frames)}")
 
     # ── MACE hyperparameters ───────────────────────────────────────────────────
     prior_weight = 0.5          # float or 3-list [xyt_w, yzt_w, xzt_w]
@@ -103,8 +102,8 @@ if __name__ == "__main__":
     # ── Build model ────────────────────────────────────────────────────────────
     print("\n************** Build 4D MACE model **************")
     model_4d = MACE4DModel(
-        sino_list=sino_list,
-        model_list=model_list,
+        sino_list=sino_frames,
+        model_list=model_frames,
         prior_weight=prior_weight,
         rho=rho,
         max_mace_itr=max_mace_itr,

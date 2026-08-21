@@ -39,9 +39,9 @@ class MACE4DModel:
     Parameters
     ----------
     sino_list : list of ndarray
-        Per-time-bin sinograms, each shape (views_per_bin, det_rows, det_cols).
+        Per-time-frame sinograms, each shape (views_per_frame, det_rows, det_cols).
     model_list : list of mbirjax.ConeBeamModel
-        Per-time-bin cone-beam models (one per bin, built via copy_ct_model).
+        Per-time-frame cone-beam models (one per frame, built via copy_ct_model).
     prior_weight : float or list of float
         Weight given to prior agents.
         Scalar w  → [1-w, w/3, w/3, w/3] across [forward, xyt, yzt, xzt].
@@ -98,7 +98,7 @@ class MACE4DModel:
         self.beta = normalize_prior_weights(prior_weight)
 
         if verbose:
-            print(f"[MACE4D] Building weights for {self.nt} time bins...")
+            print(f"[MACE4D] Building weights for {self.nt} time frames...")
         self.weights_list = [
             mj.gen_weights(jnp.asarray(s), weight_type=weight_type)
             for s in sino_list
@@ -124,7 +124,7 @@ class MACE4DModel:
         Parameters
         ----------
         init_image : ndarray or None
-            Initial 4D image, shape (nt, nx, ny, nz). If None, a per-bin
+            Initial 4D image, shape (nt, nx, ny, nz). If None, a per-frame
             MBIR recon is computed automatically and saved to init_save_dir.
         parallel : bool
             True  → 4-GPU ThreadPoolExecutor (requires ≥4 GPUs).
@@ -184,9 +184,9 @@ class MACE4DModel:
                 "[MACE] GPU assignment: "
                 + ", ".join(f"Agent{k}->GPU{idx}" for k, idx in enumerate(device_indices))
             )
-            print(f"[MACE] Start 4D reconstruction with {nt} time bins.")
+            print(f"[MACE] Start 4D reconstruction with {nt} time frames.")
 
-        # ── SINGLE-GPU FIX: pin each per-bin ConeBeamModel to Agent 0's GPU ──
+        # ── SINGLE-GPU FIX: pin each per-frame ConeBeamModel to Agent 0's GPU ──
         # Without this, every model auto-shards across all GPUs on first call,
         # causing all 4 agents to open a 4-way NCCL clique simultaneously →
         # deadlock ("Acquire clique ... may be stuck").
@@ -272,7 +272,7 @@ class MACE4DModel:
         # ThreadPoolExecutor below; each runs on its own OS thread.
 
         def run_forward_agent(W_k, X_prev, device_index):
-            """Agent 0: cone-beam prox_map, serial over time bins, one GPU."""
+            """Agent 0: cone-beam prox_map, serial over time frames, one GPU."""
             device = devices[device_index]
             agent_t0 = time.time()
             out = np.stack([
@@ -429,7 +429,7 @@ class MACE4DModel:
         device = jax.devices()[0]
 
         if verbose:
-            print(f"[MACE] Start serial 4D reconstruction with {nt} time bins on {device}.")
+            print(f"[MACE] Start serial 4D reconstruction with {nt} time frames on {device}.")
 
         if init_image is None:
             if verbose:

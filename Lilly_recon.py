@@ -31,7 +31,7 @@ import mbirjax.preprocess as mjp
 import numpy as np
 
 from model_4d import MACE4DModel
-from utils import truncate_sino_into_time_bins, compute_bin_params, gen_gif_and_save
+from utils import construct_time_frames, compute_frame_params, gen_gif_and_save
 
 if __name__ == "__main__":
 
@@ -58,11 +58,11 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--angle_span_per_recon", type=float, default=120.0,
-        help="Angular span (degrees) covered by each time bin.",
+        help="Angular span (degrees) covered by each time frame.",
     )
     parser.add_argument(
         "--angle_advancing", type=float, default=60.0,
-        help="Degrees advanced per bin step (= span - overlap).",
+        help="Degrees advanced per frame step (= span - overlap).",
     )
     parser.add_argument(
         "--max_mace_itr", type=int, default=10,
@@ -74,11 +74,11 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--num_frames", type=int, default=None,
-        help="Reconstruct only the first N time bins. Omit to use all bins.",
+        help="Reconstruct only the first N time frames. Omit to use all frames.",
     )
     parser.add_argument(
         "--resume", type=str, default=None, metavar="INIT_PATH",
-        help="Path to a saved init_image.npy to skip per-bin initialization.",
+        help="Path to a saved init_image.npy to skip per-frame initialization.",
     )
     args = parser.parse_args()
 
@@ -100,11 +100,11 @@ if __name__ == "__main__":
     forward_num_iterations = 3
     stop_threshold = 0.02
     verbose = 1
-    angle_span_per_recon = args.angle_span_per_recon  # Angular span (degrees) covered by each time bin.
-    angle_advancing      = args.angle_advancing  # Degrees advanced per bin step.
+    angle_span_per_recon = args.angle_span_per_recon  # Angular span (degrees) covered by each time frame.
+    angle_advancing      = args.angle_advancing  # Degrees advanced per frame step.
     dejitter_period = int(round(360.0 / angle_advancing))  # period of the jitter introduced by sinogram gating
 
-    views_per_bin, stride = compute_bin_params(args.data_path, angle_span_per_recon, angle_advancing)
+    views_per_frame, stride = compute_frame_params(args.data_path, angle_span_per_recon, angle_advancing)
 
     # ── Preprocessing ──────────────────────────────────────────────────────────
     print("\n************** NSI dataset preprocessing **************")
@@ -117,21 +117,19 @@ if __name__ == "__main__":
     )
     ct_model.set_params(sharpness=sharpness, verbose=verbose, positivity_flag=True)
 
-    # ── Time bin splitting ─────────────────────────────────────────────────────
-    print("\n************** Split into time bins **************")
-    bins = truncate_sino_into_time_bins(
+    # ── Time frame construction ────────────────────────────────────────────────
+    print("\n************** Construct time frames **************")
+    sino_frames, model_frames = construct_time_frames(
         sino=sino,
         model=ct_model,
-        views_per_bin=views_per_bin,
+        views_per_frame=views_per_frame,
         stride=stride,
     )
-    print(f"Total bins: {len(bins)}")
+    print(f"Total frames: {len(sino_frames)}")
     if args.num_frames is not None:
-        bins = bins[:args.num_frames]
-        print(f"Using first {len(bins)} bins (--num_frames={args.num_frames}).")
-
-    sino_list = [b[0] for b in bins]
-    model_list = [b[1] for b in bins]
+        sino_frames = sino_frames[:args.num_frames]
+        model_frames = model_frames[:args.num_frames]
+        print(f"Using first {len(sino_frames)} frames (--num_frames={args.num_frames}).")
 
     # ── Init image (resume or fresh) ───────────────────────────────────────────
     init_image = None
@@ -144,8 +142,8 @@ if __name__ == "__main__":
     # ── Build model ────────────────────────────────────────────────────────────
     print("\n************** Build 4D MACE model **************")
     model_4d = MACE4DModel(
-        sino_list=sino_list,
-        model_list=model_list,
+        sino_list=sino_frames,
+        model_list=model_frames,
         prior_weight=prior_weight,
         rho=rho,
         max_mace_itr=args.max_mace_itr,

@@ -22,11 +22,11 @@ Entry point for Lilly production runs. Launched via `bash test_script_4D.sh` or 
 | `--downsample_row` | `1` | Detector row subsampling factor; increase to trade resolution for speed |
 | `--downsample_column` | `1` | Detector column subsampling factor; increase to trade resolution for speed |
 | `--subsample_view_factor` | `1` | View subsampling factor; increase to use fewer projection angles |
-| `--angle_span_per_recon` | `120.0` | Degrees covered per time bin |
-| `--angle_advancing` | `60.0` | Degrees advanced per bin step (= span − overlap) |
+| `--angle_span_per_recon` | `120.0` | Degrees covered per time frame |
+| `--angle_advancing` | `60.0` | Degrees advanced per frame step (= span − overlap) |
 | `--max_mace_itr` | `10` | Number of outer MACE iterations |
 | `--output_path` | `./output` | Output directory |
-| `--num_frames` | *(all bins)* | Reconstruct only the first N time bins |
+| `--num_frames` | *(all frames)* | Reconstruct only the first N time frames |
 | `--resume` | *(off by default)* | Path to a previously saved `init_image.npy`; skips recomputing the initialization |
 
 ---
@@ -37,8 +37,8 @@ Entry point for Lilly production runs. Launched via `bash test_script_4D.sh` or 
 
 | Parameter | Value | How it's set                                                                     |
 |---|---|----------------------------------------------------------------------------------|
-| `views_per_bin` | derived | `round(angle_span_per_recon / angle_step)` via `compute_bin_params()`            |
-| `stride` | derived | `round(angle_advancing / angle_step)` via `compute_bin_params()`                 |
+| `views_per_frame` | derived | `round(angle_span_per_recon / angle_step)` via `compute_frame_params()`          |
+| `stride` | derived | `round(angle_advancing / angle_step)` via `compute_frame_params()`               |
 | `dejitter_period` | derived | `round(360 / angle_advancing)` = 6 for 60° advance                               |
 
 `angle_span_per_recon` and `angle_advancing` are CLI flags (defaults 120° and 60°); see the table above.
@@ -72,5 +72,5 @@ Entry point for Lilly production runs. Launched via `bash test_script_4D.sh` or 
 | File | Description |
 |---|---|
 | `recon_4d_<time>h.npy` | Final 4D reconstruction, shape `(nt, nx, ny, nz)` |
-| `init/init_image.npy` | Per-bin MBIR initialization (reused with `--resume`) |
+| `init/init_image.npy` | Per-frame MBIR initialization (reused with `--resume`) |
 | `timing_log.csv` | Per-iteration wall time for each MACE agent |

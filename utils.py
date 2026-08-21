@@ -25,25 +25,25 @@ _THREAD_LOCAL = threading.local()
 
 
 # ---------------------------------------------------------------------------
-# Bin parameter computation from nsipro
+# Frame parameter computation from nsipro
 # ---------------------------------------------------------------------------
 
-def compute_bin_params(data_path, angle_span_per_recon, angle_advancing):
+def compute_frame_params(data_path, angle_span_per_recon, angle_advancing):
     """
-    Compute views_per_bin and stride from the dataset's nsipro file.
+    Compute views_per_frame and stride from the dataset's nsipro file.
 
     Parameters
     ----------
     data_path : str
         Path to the NSI dataset folder (must contain exactly one .nsipro file).
     angle_span_per_recon : float
-        Angular span (degrees) covered by each time bin.
+        Angular span (degrees) covered by each time frame.
     angle_advancing : float
-        Degrees advanced per bin step.
+        Degrees advanced per frame step.
 
     Returns
     -------
-    views_per_bin : int
+    views_per_frame : int
     stride : int
     """
     nsipro_files = glob.glob(os.path.join(data_path, '*.nsipro'))
@@ -60,55 +60,55 @@ def compute_bin_params(data_path, angle_span_per_recon, angle_advancing):
         for l in lines[start:end] if '<angleStep>' in l
     ))
 
-    views_per_bin = int(round(angle_span_per_recon / angle_step))
-    stride        = int(round(angle_advancing / angle_step))
-    return views_per_bin, stride
+    views_per_frame = int(round(angle_span_per_recon / angle_step))
+    stride          = int(round(angle_advancing / angle_step))
+    return views_per_frame, stride
 
 
 # ---------------------------------------------------------------------------
 # Sinogram splitting
 # ---------------------------------------------------------------------------
 
-def truncate_sino_into_time_bins(sino, model, views_per_bin, stride):
+def construct_time_frames(sino, model, views_per_frame, stride):
     """
-    Split a full sinogram into overlapping fixed-size time bins.
+    Split a full sinogram into overlapping fixed-size time frames.
 
     Parameters
     ----------
     sino : ndarray, shape (num_views, det_rows, det_cols)
     model : mbirjax.ConeBeamModel
         Fully-built model for the full scan.
-    views_per_bin : int
-        Number of views in each bin.
+    views_per_frame : int
+        Number of views in each frame.
     stride : int
-        Step size (in views) between consecutive bins.
+        Step size (in views) between consecutive frames.
 
     Returns
     -------
-    list of (sino_t, model_t, slice)
-        sino_t has exactly `views_per_bin` views; model_t is a per-bin
-        ConeBeamModel built via mj.copy_ct_model. Trailing views that cannot
-        form a full bin are discarded.
+    sino_frames : list of ndarray
+        Each has exactly `views_per_frame` views. Trailing views that cannot
+        form a full frame are discarded.
+    model_frames : list of mbirjax.ConeBeamModel
+        Per-frame models built via mj.copy_ct_model.
     """
     required_params, _, _ = model.get_all_params()
     angles = required_params["angles"]
     num_views = sino.shape[0]
 
-    if views_per_bin <= 0:
-        raise ValueError("views_per_bin must be a positive integer.")
+    if views_per_frame <= 0:
+        raise ValueError("views_per_frame must be a positive integer.")
     if stride <= 0:
         raise ValueError("stride must be a positive integer.")
-    if views_per_bin > num_views:
-        raise ValueError("views_per_bin cannot exceed total number of views.")
+    if views_per_frame > num_views:
+        raise ValueError("views_per_frame cannot exceed total number of views.")
 
-    bins = []
-    for start in range(0, num_views - views_per_bin + 1, stride):
-        end = start + views_per_bin
-        sl = slice(start, end)
-        sino_t = sino[sl]
-        model_t = mj.copy_ct_model(model, new_angles=angles[sl])
-        bins.append((sino_t, model_t, sl))
-    return bins
+    sino_frames = []
+    model_frames = []
+    for start in range(0, num_views - views_per_frame + 1, stride):
+        sl = slice(start, start + views_per_frame)
+        sino_frames.append(sino[sl])
+        model_frames.append(mj.copy_ct_model(model, new_angles=angles[sl]))
+    return sino_frames, model_frames
 
 
 # ---------------------------------------------------------------------------

@@ -12,7 +12,7 @@ bash test_script_4D.sh
 
 Output is written to `./output/`:
 - `recon_4d_<time>h.npy` — reconstructed 4D volume, shape `(nt, nx, ny, nz)`
-- `init/init_image.npy` — per-bin MBIR initialization (saved for potential reuse)
+- `init/init_image.npy` — per-frame MBIR initialization (saved for potential reuse)
 - `timing_log.csv` — per-iteration agent timing
 
 To skip re-initialization on a second run, add `--resume <path-to-init_image.npy>` to the python command in `test_script_4D.sh` (a commented placeholder is already there).
@@ -25,7 +25,7 @@ To skip re-initialization on a second run, add `--resume <path-to-init_image.npy
 ├── Lilly_recon.py        # production CLI script (few argparse flags)
 ├── dev_recon.py          # dev/exploration script (all params as Python variables)
 ├── model_4d.py           # MACE4DModel class (serial + multi-GPU)
-├── utils.py              # shared utilities (time binning, dejitter, denoiser helpers)
+├── utils.py              # shared utilities (time-frame construction, dejitter, denoiser helpers)
 ├── plans/
 │   ├── refactor_plan.md  # design decisions and interface discussion
 │   └── lilly_interface.md # parameter reference for Lilly operators
@@ -39,28 +39,26 @@ The original serial and multi-GPU implementations (`4DMACE_serial/`, `4DMACE_mul
 | File | Purpose |
 |------|---------|
 | `test_script_4D.sh` | Shell entry point. Edit `DATA_PATH`; everything else has sensible defaults. |
-| `Lilly_recon.py` | Production script. Minimal CLI: data path, downsampling, bin params, iteration count. Algorithmic hyperparameters are fixed. |
+| `Lilly_recon.py` | Production script. Minimal CLI: data path, downsampling, frame params, iteration count. Algorithmic hyperparameters are fixed. |
 | `dev_recon.py` | Dev script. All parameters are Python variables at the top. Supports `USE_SAVED_INIT_IMAGE`, `parallel`, `time_range`, custom `device_indices`, etc. |
 | `model_4d.py` | `MACE4DModel` class. Call `model.recon(parallel=True)` for multi-GPU or `model.recon(parallel=False)` for serial. |
-| `utils.py` | Stateless helpers shared by both modes: `truncate_sino_into_time_bins`, `dejitter_4d_dct`, denoiser utilities. |
+| `utils.py` | Stateless helpers shared by both modes: `construct_time_frames`, `dejitter_4d_dct`, denoiser utilities. |
 
 ## MACE4DModel Interface
 
 ```python
 from model_4d import MACE4DModel
-from utils import truncate_sino_into_time_bins
+from utils import construct_time_frames
 
 # 1. Preprocess with mbirjax
 sino, ct_model = mjp.nsi.get_sino_and_model(dataset_dir, ...)
 ct_model.set_params(sharpness=1.0, positivity_flag=True)
 
-# 2. Split into time bins
-bins = truncate_sino_into_time_bins(sino, ct_model, views_per_bin=48, stride=24)
-sino_list = [b[0] for b in bins]
-model_list = [b[1] for b in bins]
+# 2. Construct time frames
+sino_frames, model_frames = construct_time_frames(sino, ct_model, views_per_frame=48, stride=24)
 
 # 3. Build model and reconstruct
-model_4d = MACE4DModel(sino_list, model_list, prior_weight=0.5, max_mace_itr=10)
+model_4d = MACE4DModel(sino_frames, model_frames, prior_weight=0.5, max_mace_itr=10)
 recon_4d = model_4d.recon(parallel=True, init_save_dir="./output/init")
 ```
 
