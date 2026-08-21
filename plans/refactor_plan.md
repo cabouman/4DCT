@@ -37,7 +37,7 @@ sigma; the test suite checks this.  The forward model now sets the iteration
 time.  At merge time the batched path should move inside QGGMRFDenoiser as a
 supported interface; align that with the mbirtorch port (Greg is active there).
 
-### Next: one GPU task queue for all agent work (planned 2026-08-21)
+### Next: one GPU task queue for all agent work (planned 2026-08-21; revised after Opus panel review)
 
 The forward model now limits the iteration time.  Its 25 proximal maps run in
 series on one GPU while the other three GPUs sit mostly idle.  The proximal
@@ -46,66 +46,120 @@ same time.
 
 **Design.**  Each MACE iteration produces 28 independent tasks: one proximal
 map per time frame (25 tasks) and one batched denoise per prior orientation
-(3 tasks).  A pool of N worker threads executes the tasks, one worker per GPU.
-Every task runs entirely on one GPU; no task is split across GPUs.  The old
-fixed roles (one forward agent, three prior agents) disappear.
+(3 tasks).  N worker threads execute the tasks, one worker per GPU.  Every
+task runs entirely on one GPU; no task is split across GPUs.  The old fixed
+roles (one forward agent, three prior agents) disappear.  The workers are N
+single-thread executors, one per GPU — not one shared pool — so each GPU's
+tasks always run on the same thread.  That is what keeps the per-thread
+denoiser caches valid and guarantees each model object is touched by exactly
+one thread.
 
 ```
 Task list (assignment computed once, reused every iteration; N = 4 shown)
 
-  prox frame 0  -> GPU 0        denoise XY-t -> GPU 1
-  prox frame 1  -> GPU 1        denoise YZ-t -> GPU 2
-  prox frame 2  -> GPU 2        denoise XZ-t -> GPU 3
-  prox frame 3  -> GPU 3
-  prox frame 4  -> GPU 0
-  ...
-  prox frame 24 -> GPU 0
+  1. Sort the 28 tasks by estimated cost (the 3 denoise tasks first,
+     then the 25 equal prox tasks).
+  2. Assign each task to the currently least-loaded GPU.
+  3. Freeze the assignment for the whole recon.
 
-  GPU 0 worker: prox 0, 4, 8, 12, 16, 20, 24
-  GPU 1 worker: prox 1, 5, ... 21, then denoise XY-t
-  GPU 2 worker: prox 2, 6, ... 22, then denoise YZ-t
-  GPU 3 worker: prox 3, 7, ... 23, then denoise XZ-t
+  GPU 0 worker: denoise XY-t, then prox frames ...   (~7.2 s)
+  GPU 1 worker: denoise YZ-t, then prox frames ...   (~7.2 s)
+  GPU 2 worker: denoise XZ-t, then prox frames ...   (~7.2 s)
+  GPU 3 worker: prox frames only                     (~7.2 s)
        |
        v
-  barrier: all tasks done -> gather frames -> dejitter -> consensus update
+  barrier: wait on every task's future (a failure raises with its task id)
+       -> gather frames in frame order -> dejitter forward stack
+       -> consensus update
 ```
 
-**Sticky assignment.**  The task-to-GPU assignment is computed once, round
-robin, and reused for every iteration.  The reason is compilation cost.  Each
-frame's cone-beam model is pinned to one GPU, and mbirjax compiles its
-projection kernels for that device.  If frame 7 ran on GPU 2 in one iteration
-and on GPU 0 in the next, the code would need a second pinned copy of the
-model and a second compilation.  A fully dynamic queue could trigger up to
-25 x N compilations before every (frame, GPU) pair is warm.  With a sticky
-assignment each pair compiles exactly once.  The cost of stickiness is small:
-the tasks are nearly uniform in size, so a fixed round robin finishes within
-about one task length of a fully dynamic queue.
+**Why the assignment is fixed (sticky).**  Two reasons, both verified against
+the mbirjax code during review.  First, thread ownership: each frame's
+cone-beam model object carries mutable state (device placement, prox data,
+log buffer), so it must only ever be used by one thread; a fixed map gives
+each model one owner.  Second, data residency: with a fixed map, each frame's
+sinogram and weights are uploaded to its GPU once at setup and stay there.
+The current code re-uploads them every iteration; at full scale that is tens
+of GB per iteration, funneled through GPU 0.  NOTE: an earlier version of
+this plan justified stickiness by compilation cost.  That was wrong — mbirjax
+compiles its projectors at module level and shares the compiled program
+across all models with the same geometry on one device, so a dynamic queue
+would cost about N compilations, not 25 x N.
 
-Upgrade path: if profiling later shows the task times are far from uniform,
-first check whether mbirjax shares compiled kernels between model instances of
-the same shape on one device.  If it does, remove the stickiness and the queue
-becomes fully dynamic.  The surrounding structure does not change.
+**Assignment rule.**  Least-loaded-first (as in the diagram), not plain round
+robin.  Round robin appends the three denoise tasks to GPUs that already hold
+six prox tasks each, which makes the slowest GPU the limit: 7.9 s instead of
+7.2 s at smoke scale, and about 22% worse than optimal at 8 GPUs.  Sorting by
+cost and assigning to the least-loaded GPU costs a few lines and removes the
+gap.  If profiling later shows imbalance — measure it as
+(makespan − mean per-GPU busy time) / makespan, act above about 10% — the
+response is to re-estimate the task costs and recompute the fixed map once,
+not to make the queue dynamic.  A later refinement that makes any assignment
+near-optimal: split each denoise into blocks of hyperplanes so all tasks are
+close to uniform (every block must reuse the same pixel partition).
 
-**Number of GPUs.**  Use all visible GPUs (jax.devices('gpu')).  On the
-cluster the Slurm request already controls how many GPUs are visible, so no
-separate parameter is needed.  The num_forward_gpus / num_prior_gpus idea is
-dropped; the queue replaces it.  parallel=False keeps the current
-single-device serial path.
+**Known crash risk to mitigate: the shared mbirjax logger.**  All models of
+one class share a single process-global logger object, and every prox_map
+call tears down and rebuilds its file handlers.  With concurrent prox calls,
+one thread can close a handler while another thread writes to it.
+Mitigation now: pass logfile_path=None and print_logs=False from worker
+tasks, and hold one lock around model initialization.  Proper fix at merge
+time: per-instance loggers in mbirjax.
+
+**Data placement.**  At setup, place each frame's sinogram and weights
+directly on that frame's assigned GPU (device_put on the numpy array — the
+current jnp.asarray-then-device_put pattern stages everything through GPU 0
+first).  Stop building the weights on the default device in __init__.
+
+**Denoiser batching fixes (found in review).**  The vmapped denoise sweep is
+currently re-traced and recompiled for every batch block, and the
+memory-derived batch size varies the block shape, which multiplies distinct
+compilations.  Fix: choose one fixed batch size per orientation, pad the last
+block to that size, and cache one jitted vmapped function per (shape,
+device).  Add an out-of-memory halve-and-retry and an absolute cap to
+_auto_batch_size.  Also note: a vmapped batch runs every lane until the
+slowest lane converges, so bigger batches do more total work; measure the
+per-lane iteration spread before letting the batch grow at full scale.
+
+**API.**  recon() takes devices=None (the vocabulary of mbirjax's
+configure_devices: None = all visible GPUs, or an explicit list/count).  The
+parallel flag is dropped: one device IS the serial path, and the same task
+order runs inline with no threads.  On the cluster the Slurm request controls
+what is visible, so the default needs no parameter.  Keep --serial in
+recon_4d.py as an alias for devices=1 for one release.  Update
+lilly_interface.md and README, which document the old flags.
 
 **Also in this change.**
-- The per-frame MBIR initialization uses the same queue, so a fresh
-  initialization runs on all GPUs instead of one.
+- The per-frame MBIR initialization uses the same workers and the same
+  frame-to-GPU map, so a fresh initialization runs on all GPUs and its
+  compiled programs and resident data carry over to the MACE loop.
 - The temporal dejitter of the forward output moves after the gather step,
-  because it filters along the time axis and needs all frames.
-- One thread pool is created per recon() call instead of per iteration, so
-  the per-thread denoiser caches survive across iterations.
-- The timing log keeps its columns.  agent_0_forward_sec becomes the wall
-  time from iteration start until the last proximal-map task finishes, and
-  the prior columns keep their per-orientation times.
+  because it filters along the time axis and needs all frames.  The prox
+  feedback path must keep the dejittered stack in X[0], exactly as today.
+- Workers live for the whole recon() call (caches survive across
+  iterations); the barrier is an explicit wait on all task futures so a
+  failed task raises immediately with its task identity.
+- Instrumentation: add logs/task_log.csv with one row per task (iteration,
+  kind, index, device, start, end).  timing_log.csv keeps iteration_total_sec
+  and consensus_change_pct; the per-agent columns are replaced by
+  prox_total_sec, denoise_total_sec, and makespan_sec.
 
-**Verification.**  The assignment does not change any computation, so the
-queued version must reproduce the current results exactly.  Check on the
-smoke configuration with the cached initialization.  Expected iteration time
-at smoke scale: about 27 seconds of total work spread over 4 GPUs, so about
-7 seconds per iteration, versus 23 seconds now.
+**Full-scale cautions (host side, independent of the queue).**  The dejitter
+(four whole-array DCT passes per iteration) and the consensus update are CPU
+work that grows ~238x from smoke to full scale and may become the bottleneck
+the queue cannot fix.  First steps: pass workers=-1 to scipy.fft dct/idct,
+and audit host RAM before a full-scale run (W, X, and temporaries exceed
+300 GB at full scale).
+
+**Verification.**  Exact reproduction is not possible: mbirjax draws its VCD
+pixel partitions from numpy's global random generator, so runs already
+differ, and thread interleaving adds more variation.  Acceptance is
+therefore: (a) a CPU test that forces several virtual devices
+(XLA_FLAGS=--xla_force_host_platform_device_count=4) and checks 1-worker
+against 4-worker agreement on a tiny problem with seeded, pre-generated
+partitions; (b) at smoke scale, agreement with the current code within its
+own measured run-to-run spread, plus a visual check.  Expected iteration
+time at smoke scale: about 7 s of GPU work plus about 1 s of host work,
+so roughly 8-9 s per iteration versus 23 s now.  Judge from iteration 2
+onward; iteration 1 pays the compilations.
 
