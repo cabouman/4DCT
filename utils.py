@@ -293,9 +293,10 @@ def denoiser_wrapper(x, permute_vector, sigma_list, device):
 # Visualization
 # ---------------------------------------------------------------------------
 
-def gen_gif_and_save(recon, gif_path, vmin=0, vmax=0.06, z_slice=None, duration=0.15):
+def gen_gif_and_save(recon, gif_path, vmin=0, vmax=0.06, x_slice=None, duration=0.15):
     """
-    Generate a GIF of one z slice of a 4D reconstruction stepping through time frames.
+    Generate a GIF of one x slice (YZ plane) of a 4D reconstruction stepping
+    through time frames. The x slice shows the motion clearly.
 
     Parameters
     ----------
@@ -304,21 +305,21 @@ def gen_gif_and_save(recon, gif_path, vmin=0, vmax=0.06, z_slice=None, duration=
         Output path for the saved GIF.
     vmin, vmax : float
         Colormap range for imshow.
-    z_slice : int or None
-        Z index to display. Defaults to the middle slice.
+    x_slice : int or None
+        X index to display. Defaults to the middle slice.
     duration : float
         Duration per frame in seconds.
     """
-    if z_slice is None:
-        z_slice = recon.shape[3] // 2
+    if x_slice is None:
+        x_slice = recon.shape[1] // 2
 
     frames = []
     for t in range(recon.shape[0]):
         fig, ax = plt.subplots(1, 1, figsize=(6, 6))
-        ax.imshow(recon[t, :, :, z_slice], cmap='gray', vmin=vmin, vmax=vmax)
+        ax.imshow(recon[t, x_slice, :, :], cmap='gray', vmin=vmin, vmax=vmax)
         ax.set_title(f't={t}')
         ax.axis('off')
-        fig.suptitle(f'z slice = {z_slice}, time frame = {t}', fontsize=14)
+        fig.suptitle(f'x slice = {x_slice}, time frame = {t}', fontsize=14)
         plt.tight_layout()
         fig.canvas.draw()
         frames.append(np.asarray(fig.canvas.buffer_rgba()))
