@@ -771,6 +771,37 @@ _DENOISE_BUFFER_MULTIPLIER = 16
 # request an enormous compile.
 _DENOISE_BATCH_CAP = 128
 
+# Floor for the auto-estimated qGGMRF regularization scale (sigma_x). Guards
+# against a batch whose statistics happen to come out at or near zero (e.g. a
+# batch dominated by background-only hyperplanes), which would otherwise make
+# the qGGMRF solver produce NaN for the whole batch.
+_SIGMA_X_FLOOR = 1e-6
+
+
+def _auto_set_regularization_params_full_batch(denoiser, image_for_stats):
+    """Auto-set sigma_y/sigma_x/sigma_prox from the whole stats array.
+
+    QGGMRFDenoiser.auto_set_regularization_params() (inherited from
+    TomographyModel) internally calls subsample_views(..., num_real_views=
+    sinogram_shape[0]). For a per-orientation batch of hyperplanes merged
+    into one array with the hyperplane axis first, sinogram_shape[0] is nt
+    (one hyperplane's time-frame count), not the batch size — so that call
+    silently uses only the first hyperplane's statistics instead of the
+    whole batch. This computes the same statistics directly on the full
+    array instead, and floors sigma_x so it cannot come out at zero.
+    """
+    image_for_stats = np.asarray(image_for_stats)
+    sino_indicator = denoiser._get_sino_indicator(image_for_stats)
+    denoiser.auto_set_sigma_y(image_for_stats, sino_indicator)
+    recon_std = denoiser._get_estimate_of_recon_std(image_for_stats, sino_indicator)
+    if not np.isfinite(recon_std):
+        recon_std = 0.0
+    denoiser.auto_set_sigma_x(recon_std)
+    denoiser.auto_set_sigma_prox(recon_std)
+    sigma_x = denoiser.get_params('sigma_x')
+    if not np.isfinite(sigma_x) or sigma_x < _SIGMA_X_FLOOR:
+        denoiser.set_params(no_warning=True, sigma_x=np.float32(_SIGMA_X_FLOOR))
+
 
 def _configure_denoiser(denoiser, sigma, image_for_stats):
     """Set the shared sigma and the regularization constants on the denoiser.
@@ -781,7 +812,7 @@ def _configure_denoiser(denoiser, sigma, image_for_stats):
     denoiser.set_params(use_ror_mask=False, sigma_noise=float(sigma))
     verbose = denoiser.get_params('verbose')
     denoiser.set_params(verbose=0)
-    denoiser.auto_set_regularization_params(image_for_stats)
+    _auto_set_regularization_params_full_batch(denoiser, image_for_stats)
     denoiser.set_params(verbose=verbose)
     # The sweep's progress callback converts its arguments with int()/float(),
     # which fails on the batched arrays a vmapped sweep passes it; silence it.
