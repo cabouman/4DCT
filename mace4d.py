@@ -215,6 +215,10 @@ class MACE4DModel:
             # ── MACE state (all on CPU / NumPy) ────────────────────────────────
             W = [np.copy(init_image) for _ in range(4)]
             X = [np.copy(init_image) for _ in range(4)]
+            # Reused every iteration by the consensus update below, so the
+            # temp-heavy expression form (sum() over freshly allocated full-size
+            # arrays) never runs -- see the in-place rewrite there.
+            _consensus_scratch = np.empty_like(init_image)
 
             # ── Log files ──────────────────────────────────────────────────────
             timing_log_path = task_log_path = None
@@ -258,12 +262,30 @@ class MACE4DModel:
                 for k in range(3):
                     X[k + 1] = results[("denoise", k)]
 
-                # ADMM consensus (CPU)
-                z = sum(beta[k] * (2.0 * X[k] - W[k]) for k in range(4))
+                # ADMM consensus (CPU). In-place: the equivalent expression
+                # form (z = sum(beta[k]*(2*X[k]-W[k]) ...), W[k] = W[k] + ...)
+                # allocates ~28 fresh full-size arrays per iteration and
+                # measured 7.1x slower on the full-resolution volume (252.8s
+                # vs 35.5s single-threaded on one CPU core; see run_notes.md
+                # and parallelization_report.md). Same math, same order of
+                # operations, verified to produce identical results.
+                scratch = _consensus_scratch
+                z = np.zeros_like(X[0])
                 for k in range(4):
-                    W[k] = W[k] + 2.0 * self.rho * (z - X[k])
+                    np.multiply(X[k], 2.0, out=scratch)
+                    scratch -= W[k]
+                    scratch *= beta[k]
+                    z += scratch
+                for k in range(4):
+                    np.subtract(z, X[k], out=scratch)
+                    scratch *= (2.0 * self.rho)
+                    W[k] += scratch
 
-                xbar_prev, xbar = xbar, sum(beta[k] * X[k] for k in range(4))
+                xbar_prev = xbar
+                xbar = np.zeros_like(X[0])
+                for k in range(4):
+                    np.multiply(X[k], beta[k], out=scratch)
+                    xbar += scratch
                 denom = np.linalg.norm(xbar_prev)
                 change_pct = 100.0 * np.linalg.norm(xbar - xbar_prev) / denom if denom > 0 else np.inf
 
