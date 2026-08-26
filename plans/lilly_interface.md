@@ -59,7 +59,36 @@ Entry point for Lilly production runs. Launched via `bash demo_4d.sh` or directl
 
 `angle_span_per_frame` and `angle_stride` are CLI flags in degrees (defaults 120° and 60°); internally all angles are radians. The sinogram weighting scheme is fixed at `"transmission_root"` (default in `MACE4DModel`).
 
-> **Slurm note (Magtrain cluster):** Always request 4 GPUs when submitting the job, e.g. `--gres=gpu:4`.
+> **Slurm note:** the reconstruction is not hard-coded to a fixed GPU count —
+> `devices=None` (the default) uses however many GPUs are visible, from 1 up
+> to any number, and the task queue load-balances across whichever count it
+> gets. All timing figures in this document are measured on 4x H100 GPUs;
+> a different GPU count will run correctly but at different speed, not yet
+> characterized. Request GPUs with e.g. `--gres=gpu:h100:4`.
+
+---
+
+## Reference run: size and timing
+
+Measured on the `Phantom_30s_Run1_Dec2024` dataset at full resolution
+(`--downsample_row 1 --downsample_column 1 --subsample_view_factor 1`),
+97 time frames, 10 MACE iterations, 4x H100 GPUs (job 15506035,
+2026-08-25/26). Use this as a reference point when estimating other runs.
+
+| | Value |
+|---|---|
+| Reconstruction shape | `(97, 260, 260, 728)` — `(nt, nx, ny, nz)`, float32 |
+| Saved recon file size | ~19 GB |
+| Total wall time (cached init) | 1:00:34 |
+| Wall time if init must be recomputed | add roughly 15-20 minutes (per-frame MBIR init, parallelized across all visible GPUs) |
+| Steady-state time per MACE iteration | ~320-330 s |
+| Steady-state GPU makespan per iteration | ~150-160 s |
+
+Reducing `--downsample_row`/`--downsample_column` (i.e. increasing them
+above 1) or `--num_frames` shrinks both the reconstruction shape and the
+wall time roughly in proportion; see `plans/refactor_plan.md` for the
+smaller "smoke" configuration (25 frames, 8x4 downsampling) used for fast
+iteration during development.
 
 ---
 
