@@ -66,17 +66,17 @@ class MACE4DModel:
         Per-time-frame sinograms, each shape (views_per_frame, det_rows, det_cols).
     model_list : list of mbirjax.ConeBeamModel
         Per-time-frame cone-beam models (one per frame, built via copy_ct_model).
-    prior_weight : float or list of float
+    mace_prior_weight : float or list of float
         Weight given to prior agents.
         Scalar w  → [1-w, w/3, w/3, w/3] across [forward, xyt, yzt, xzt].
         3-list    → [1-sum, w0, w1, w2] (override each prior independently).
-    rho : float
-        ADMM step size (Mann iteration parameter). Default 0.5.
+    rho_mann : float
+        Mann iteration step size (ADMM rho). Default 0.5.
     max_mace_itr : int
         Number of outer MACE iterations. Default 10.
-    num_prox_iterations : int
+    prox_num_iterations : int
         Max prox_map iterations per MACE step. Default 3.
-    stop_threshold : float
+    prox_stop_threshold : float
         Convergence threshold passed to prox_map. Default 0.02.
     weight_type : str
         Sinogram weight type for mj.gen_weights. Default "transmission_root".
@@ -84,8 +84,9 @@ class MACE4DModel:
         Proximal map sigma. None lets mbirjax choose automatically.
     dejitter : bool
         Apply DCT-I temporal dejitter inside each agent. Default True.
-    dejitter_period : int
-        Jitter period in frames (frames per gating cycle). Default 6.
+    frames_per_rotation : int
+        Time frames per full 360 degree rotation. This is also the period
+        of the jitter introduced by sinogram gating. Default 6.
     verbose : int
         0 = silent, 1 = normal progress, 2 = debug.
     """
@@ -94,15 +95,15 @@ class MACE4DModel:
         self,
         sino_list,
         model_list,
-        prior_weight=0.5,
-        rho=0.5,
+        mace_prior_weight=0.5,
+        rho_mann=0.5,
         max_mace_itr=10,
-        num_prox_iterations=3,
-        stop_threshold=0.02,
+        prox_num_iterations=3,
+        prox_stop_threshold=0.02,
         weight_type="transmission_root",
         sigma_p=None,
         dejitter=True,
-        dejitter_period=6,
+        frames_per_rotation=6,
         verbose=1,
     ):
         if len(sino_list) != len(model_list):
@@ -111,15 +112,15 @@ class MACE4DModel:
         self.sino_list = sino_list
         self.model_list = model_list
         self.nt = len(sino_list)
-        self.rho = rho
+        self.rho_mann = rho_mann
         self.max_mace_itr = max_mace_itr
-        self.num_prox_iterations = num_prox_iterations
-        self.stop_threshold = stop_threshold
+        self.prox_num_iterations = prox_num_iterations
+        self.prox_stop_threshold = prox_stop_threshold
         self.sigma_p = sigma_p
         self.verbose = verbose
         self.dejitter = dejitter
-        self.dejitter_period = dejitter_period
-        self.beta = _normalize_prior_weights(prior_weight)
+        self.frames_per_rotation = frames_per_rotation
+        self.beta = _normalize_prior_weights(mace_prior_weight)
 
         if verbose:
             print(f"[MACE4D] Building weights for {self.nt} time frames...")
@@ -278,7 +279,7 @@ class MACE4DModel:
                     z += scratch
                 for k in range(4):
                     np.subtract(z, X[k], out=scratch)
-                    scratch *= (2.0 * self.rho)
+                    scratch *= (2.0 * self.rho_mann)
                     W[k] += scratch
 
                 xbar_prev = xbar
@@ -386,8 +387,8 @@ class MACE4DModel:
                 sigma_prox=self.sigma_p,
                 weights=self._weights_dev[t],
                 init_recon=jax.device_put(X0_t, device),
-                max_iterations=self.num_prox_iterations,
-                stop_threshold_change_pct=self.stop_threshold,
+                max_iterations=self.prox_num_iterations,
+                stop_threshold_change_pct=self.prox_stop_threshold,
                 logfile_path=None,
                 print_logs=False,
             )[0])
@@ -405,7 +406,7 @@ class MACE4DModel:
                 self._sino_dev[t],
                 weights=self._weights_dev[t],
                 max_iterations=_INIT_MBIR_ITERATIONS,
-                stop_threshold_change_pct=self.stop_threshold,
+                stop_threshold_change_pct=self.prox_stop_threshold,
                 logfile_path=None,
                 print_logs=False,
             )[0])
@@ -426,7 +427,7 @@ class MACE4DModel:
         """Apply the DCT-I temporal dejitter if enabled; otherwise return x unchanged."""
         if not self.dejitter:
             return x
-        return _dejitter_4d_dct(x, period=self.dejitter_period, harmonics=True,
+        return _dejitter_4d_dct(x, period=self.frames_per_rotation, harmonics=True,
                                band_width=1, dtype=np.float32,
                                verbose=bool(self.verbose))
 
@@ -450,13 +451,13 @@ class MACE4DModel:
             f"mode                 = {mode}",
             f"init source          = {init_source}",
             f"beta [fwd, xyt, yzt, xzt] = {[round(float(b), 4) for b in self.beta]}",
-            f"rho                  = {self.rho}",
+            f"rho_mann             = {self.rho_mann}",
             f"max_mace_itr         = {self.max_mace_itr}",
-            f"num_prox_iterations  = {self.num_prox_iterations}",
-            f"stop_threshold       = {self.stop_threshold}",
+            f"prox_num_iterations  = {self.prox_num_iterations}",
+            f"prox_stop_threshold  = {self.prox_stop_threshold}",
             f"sigma_p              = {'auto' if self.sigma_p is None else self.sigma_p}",
             f"denoiser sigma (global) = {global_sigma:.6g}",
-            f"dejitter             = {self.dejitter}, period {self.dejitter_period}",
+            f"dejitter             = {self.dejitter}, frames_per_rotation {self.frames_per_rotation}",
         ]
         with open(os.path.join(log_dir, "run_info.txt"), "w") as f:
             f.write("\n".join(lines) + "\n")
@@ -593,7 +594,7 @@ def _silence_model_logging(model, name):
 # Time frame construction
 # ---------------------------------------------------------------------------
 
-def construct_time_frames(sino, model, angle_span_per_frame, angle_stride):
+def construct_time_frames(sino, model, frames_per_rotation=6, frame_overlap_factor=2.0):
     """
     Split a full sinogram into overlapping fixed-size time frames.
 
@@ -605,19 +606,25 @@ def construct_time_frames(sino, model, angle_span_per_frame, angle_stride):
     sino : ndarray, shape (num_views, det_rows, det_cols)
     model : mbirjax.ConeBeamModel
         Fully-built model for the full scan.
-    angle_span_per_frame : float
-        Angular span (radians) covered by each time frame.
-    angle_stride : float
-        Radians advanced per frame step.
+    frames_per_rotation : int
+        Number of time frames per full 360 degree rotation. Default 6
+        (one frame every 60 degrees).
+    frame_overlap_factor : float
+        Number of frames that share any given view. Each frame spans
+        frame_overlap_factor * (360 / frames_per_rotation) degrees.
+        Default 2.0 (each frame spans 120 degrees).
 
     Returns
     -------
     sino_frames : list of ndarray
-        Each covers angle_span_per_frame radians of views. Trailing views that
-        cannot form a full frame are discarded.
+        Trailing views that cannot form a full frame are discarded.
     model_frames : list of mbirjax.ConeBeamModel
         Per-frame models built via mj.copy_ct_model.
     """
+    # Internal angular quantities in radians.
+    angle_stride = 2.0 * np.pi / frames_per_rotation
+    angle_span_per_frame = frame_overlap_factor * angle_stride
+
     required_params, _, _ = model.get_all_params()
     angles = required_params["angles"]
     num_views = sino.shape[0]
@@ -630,11 +637,11 @@ def construct_time_frames(sino, model, angle_span_per_frame, angle_stride):
     stride          = int(round(angle_stride / angle_step))
 
     if views_per_frame <= 0:
-        raise ValueError("angle_span_per_frame must cover at least one view.")
+        raise ValueError("frame_overlap_factor gives a frame span smaller than one view.")
     if stride <= 0:
-        raise ValueError("angle_stride must cover at least one view.")
+        raise ValueError("frames_per_rotation gives a stride smaller than one view.")
     if views_per_frame > num_views:
-        raise ValueError("angle_span_per_frame cannot exceed the full scan.")
+        raise ValueError("frame span cannot exceed the full scan.")
 
     sino_frames = []
     model_frames = []

@@ -54,19 +54,20 @@ def parse_args():
     g.add_argument("--sharpness", type=float, default=1.0, help="mbirjax sharpness parameter.")
 
     g = parser.add_argument_group("time frames")
-    g.add_argument("--angle_span_per_frame", type=float, default=120.0,
-                   help="Angular span (degrees) covered by each time frame.")
-    g.add_argument("--angle_stride", type=float, default=60.0,
-                   help="Degrees advanced per frame step (= span - overlap).")
+    g.add_argument("--frames_per_rotation", type=int, default=6,
+                   help="Time frames per full 360-degree rotation.")
+    g.add_argument("--frame_overlap_factor", type=float, default=2.0,
+                   help="Number of frames that share any given view. Each frame "
+                        "spans frame_overlap_factor * (360 / frames_per_rotation) degrees.")
     g.add_argument("--num_frames", type=int, default=None,
                    help="Reconstruct only the first N time frames. Omit to use all frames.")
 
     g = parser.add_argument_group("MACE algorithm")
     g.add_argument("--max_mace_itr", type=int, default=10, help="Maximum number of outer MACE iterations.")
-    g.add_argument("--prior_weight", type=float, default=0.5, help="Total weight of the three prior agents.")
-    g.add_argument("--rho", type=float, default=0.5, help="ADMM step size (Mann iteration parameter).")
-    g.add_argument("--num_prox_iterations", type=int, default=3, help="Max prox_map iterations per MACE step.")
-    g.add_argument("--stop_threshold", type=float, default=0.02, help="Prox_map convergence threshold.")
+    g.add_argument("--mace_prior_weight", type=float, default=0.5, help="Total weight of the three prior agents.")
+    g.add_argument("--rho_mann", type=float, default=0.5, help="Mann iteration step size (ADMM rho).")
+    g.add_argument("--prox_num_iterations", type=int, default=3, help="Max prox_map iterations per MACE step.")
+    g.add_argument("--prox_stop_threshold", type=float, default=0.02, help="Prox_map convergence threshold.")
     g.add_argument("--sigma_p", type=float, default=None, help="Proximal map sigma. Omit for automatic selection.")
     g.add_argument("--no_dejitter", action="store_true", help="Disable the DCT-I temporal dejitter.")
 
@@ -94,7 +95,8 @@ def append_run_info(log_dir, args, dataset_dir, num_frames, run_time_h, out_path
         f.write(f"dataset              = {dataset_dir}\n")
         f.write(f"downsample (row, col) = ({args.downsample_row}, {args.downsample_column})\n")
         f.write(f"subsample_view_factor = {args.subsample_view_factor}\n")
-        f.write(f"angle span / stride  = {args.angle_span_per_frame} deg / {args.angle_stride} deg\n")
+        f.write(f"frames_per_rotation  = {args.frames_per_rotation}\n")
+        f.write(f"frame_overlap_factor = {args.frame_overlap_factor}\n")
         f.write(f"num_frames           = {num_frames}\n")
         f.write(f"sharpness            = {args.sharpness}\n")
         f.write(f"total wall time      = {run_time_h:.2f} h\n")
@@ -110,11 +112,6 @@ def main():
     init_dir = os.path.join(output_path, "init")
     log_dir = os.path.join(output_path, "logs")
 
-    # CLI angles arrive in degrees; all computation is in radians.
-    angle_span_per_frame = np.radians(args.angle_span_per_frame)
-    angle_stride         = np.radians(args.angle_stride)
-    dejitter_period = int(round(2.0 * np.pi / angle_stride))  # period of the jitter introduced by sinogram gating
-
     print("\n************** NSI dataset preprocessing **************")
     sino, ct_model = mjp.nsi.get_sino_and_model(
         dataset_dir,
@@ -128,8 +125,8 @@ def main():
     sino_frames, model_frames = construct_time_frames(
         sino=sino,
         model=ct_model,
-        angle_span_per_frame=angle_span_per_frame,
-        angle_stride=angle_stride,
+        frames_per_rotation=args.frames_per_rotation,
+        frame_overlap_factor=args.frame_overlap_factor,
     )
     print(f"Total frames: {len(sino_frames)}")
     if args.num_frames is not None:
@@ -141,14 +138,14 @@ def main():
     mace_model = MACE4DModel(
         sino_list=sino_frames,
         model_list=model_frames,
-        prior_weight=args.prior_weight,
-        rho=args.rho,
+        mace_prior_weight=args.mace_prior_weight,
+        rho_mann=args.rho_mann,
         max_mace_itr=args.max_mace_itr,
-        num_prox_iterations=args.num_prox_iterations,
-        stop_threshold=args.stop_threshold,
+        prox_num_iterations=args.prox_num_iterations,
+        prox_stop_threshold=args.prox_stop_threshold,
         sigma_p=args.sigma_p,
         dejitter=not args.no_dejitter,
-        dejitter_period=dejitter_period,
+        frames_per_rotation=args.frames_per_rotation,
         verbose=args.verbose,
     )
 

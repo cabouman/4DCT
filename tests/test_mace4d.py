@@ -82,7 +82,7 @@ def test_frame_count_and_views(small_model, small_sino):
     # 120 degree frames advancing 60 degrees: views 0-7, 4-11, 8-15, 12-19, 16-23.
     sino_frames, model_frames = construct_time_frames(
         small_sino, small_model,
-        angle_span_per_frame=np.radians(120.0), angle_stride=np.radians(60.0))
+        frames_per_rotation=6, frame_overlap_factor=2.0)
     assert len(sino_frames) == len(model_frames) == 5
     assert all(s.shape == (8, 8, 10) for s in sino_frames)
     assert np.array_equal(sino_frames[1], small_sino[4:12])
@@ -91,7 +91,7 @@ def test_frame_count_and_views(small_model, small_sino):
 def test_frame_angles_match_views(small_model, small_sino):
     sino_frames, model_frames = construct_time_frames(
         small_sino, small_model,
-        angle_span_per_frame=np.radians(120.0), angle_stride=np.radians(60.0))
+        frames_per_rotation=6, frame_overlap_factor=2.0)
     full_angles = small_model.get_all_params()[0]["angles"]
     frame1_angles = model_frames[1].get_all_params()[0]["angles"]
     assert np.allclose(frame1_angles, full_angles[4:12])
@@ -100,8 +100,8 @@ def test_frame_angles_match_views(small_model, small_sino):
 def test_span_too_large_raises(small_model, small_sino):
     with pytest.raises(ValueError):
         construct_time_frames(small_sino, small_model,
-                              angle_span_per_frame=np.radians(720.0),
-                              angle_stride=np.radians(60.0))
+                              frames_per_rotation=6,
+                              frame_overlap_factor=12.0)
 
 
 # ---------------------------------------------------------------------------
@@ -181,7 +181,7 @@ def test_assign_tasks_single_device():
 def test_recon_serial_end_to_end(small_model, small_sino, tmp_path):
     sino_frames, model_frames = construct_time_frames(
         small_sino, small_model,
-        angle_span_per_frame=np.radians(120.0), angle_stride=np.radians(60.0))
+        frames_per_rotation=6, frame_overlap_factor=2.0)
     # dejitter=False: a period-6 filter on a 3-frame time axis would zero
     # the whole temporal spectrum in this tiny test problem.
     m = MACE4DModel(sino_frames[:3], model_frames[:3], max_mace_itr=1,
@@ -242,7 +242,7 @@ def test_denoiser_wrapper_shape_and_axes():
 def mace_model(small_model, small_sino):
     sino_frames, model_frames = construct_time_frames(
         small_sino, small_model,
-        angle_span_per_frame=np.radians(120.0), angle_stride=np.radians(60.0))
+        frames_per_rotation=6, frame_overlap_factor=2.0)
     return MACE4DModel(sino_frames, model_frames, verbose=0)
 
 

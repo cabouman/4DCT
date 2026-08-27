@@ -22,8 +22,8 @@ Entry point for Lilly production runs. Launched via `bash demo_4d.sh` or directl
 | `--downsample_row` | `1` | Detector row subsampling factor; increase to trade resolution for speed |
 | `--downsample_column` | `1` | Detector column subsampling factor; increase to trade resolution for speed |
 | `--subsample_view_factor` | `1` | View subsampling factor; increase to use fewer projection angles |
-| `--angle_span_per_frame` | `120.0` | Degrees covered per time frame |
-| `--angle_stride` | `60.0` | Degrees advanced per frame step (= span − overlap) |
+| `--frames_per_rotation` | `6` | Time frames per full 360° rotation (one frame every 360/6 = 60°) |
+| `--frame_overlap_factor` | `2.0` | Number of frames that share any given view. Each frame spans `frame_overlap_factor * (360 / frames_per_rotation)` = 120° |
 | `--max_mace_itr` | `10` | Number of outer MACE iterations |
 | `--output_path` | `./output` | Output directory |
 | `--num_frames` | *(all frames)* | Reconstruct only the first N time frames |
@@ -34,10 +34,10 @@ Entry point for Lilly production runs. Launched via `bash demo_4d.sh` or directl
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--prior_weight` | `0.5` | Total weight of the three prior agents (forward agent gets 1 − w) |
-| `--rho` | `0.5` | ADMM step size (Mann iteration parameter) |
-| `--num_prox_iterations` | `3` | Max prox_map iterations per MACE step |
-| `--stop_threshold` | `0.02` | Prox_map convergence threshold (% change) |
+| `--mace_prior_weight` | `0.5` | Total weight of the three prior agents (forward agent gets 1 − w) |
+| `--rho_mann` | `0.5` | Mann iteration step size (ADMM rho) |
+| `--prox_num_iterations` | `3` | Max prox_map iterations per MACE step |
+| `--prox_stop_threshold` | `0.02` | Prox_map convergence threshold (% change) |
 | `--sharpness` | `1.0` | Sharpness parameter passed to `ct_model` |
 | `--sigma_p` | *(auto)* | Proximal sigma; omit for automatic selection |
 | `--no_dejitter` | *(off)* | Disables the DCT-I temporal dejitter |
@@ -53,11 +53,12 @@ Entry point for Lilly production runs. Launched via `bash demo_4d.sh` or directl
 
 | Parameter | Value | How it's set                                                                     |
 |---|---|----------------------------------------------------------------------------------|
-| `views_per_frame` | derived | `round(angle_span_per_frame / angle_step)` inside `construct_time_frames()`; angle_step comes from the model's view spacing |
+| `angle_stride` | derived | `2π / frames_per_rotation` inside `construct_time_frames()` (radians per frame step) |
+| `angle_span_per_frame` | derived | `frame_overlap_factor × angle_stride` inside `construct_time_frames()` (radians per frame) |
+| `views_per_frame` | derived | `round(angle_span_per_frame / angle_step)`; angle_step comes from the model's view spacing |
 | `stride` | derived | `round(angle_stride / angle_step)` inside `construct_time_frames()`              |
-| `dejitter_period` | derived | `round(2π / angle_stride)` = 6 for 60° stride                                    |
 
-`angle_span_per_frame` and `angle_stride` are CLI flags in degrees (defaults 120° and 60°); internally all angles are radians. The sinogram weighting scheme is fixed at `"transmission_root"` (default in `MACE4DModel`).
+`frames_per_rotation` also sets the period of the temporal dejitter filter in `MACE4DModel` (the jitter introduced by sinogram gating repeats once per rotation). Internally all angles are radians. The sinogram weighting scheme is fixed at `"transmission_root"` (default in `MACE4DModel`).
 
 > **Slurm note:** the reconstruction is not hard-coded to a fixed GPU count —
 > `devices=None` (the default) uses however many GPUs are visible, from 1 up

@@ -54,13 +54,13 @@ from mace4d import MACE4DModel, construct_time_frames
 sino, ct_model = mjp.nsi.get_sino_and_model(dataset_dir, ...)
 ct_model.set_params(sharpness=1.0, positivity_flag=True)
 
-# 2. Construct time frames
+# 2. Construct time frames: 6 frames per rotation, each view shared by 2 frames
 sino_frames, model_frames = construct_time_frames(sino, ct_model,
-                                                  angle_span_per_frame=np.radians(120.0),
-                                                  angle_stride=np.radians(60.0))
+                                                  frames_per_rotation=6,
+                                                  frame_overlap_factor=2.0)
 
 # 3. Build model and reconstruct
-mace_model = MACE4DModel(sino_frames, model_frames, prior_weight=0.5, max_mace_itr=10)
+mace_model = MACE4DModel(sino_frames, model_frames, mace_prior_weight=0.5, max_mace_itr=10)
 recon_4d = mace_model.recon(init_dir="./output/init")  # all visible GPUs
 ```
 
@@ -78,11 +78,11 @@ Any number of visible GPUs works; one device (`devices=1`, or CPU-only) runs the
 
 ## DCT-I Temporal Dejitter
 
-The dejitter step removes periodic gating jitter (period=6 frames) by zeroing the corresponding DCT-I frequency bands. It is applied:
+The dejitter step removes periodic gating jitter (one period per rotation) by zeroing the corresponding DCT-I frequency bands. It is applied:
 - After the forward agent output
 - Before each prior agent input
 
-This is controlled by `dejitter=True` (default) and `dejitter_period=6` on `MACE4DModel`.
+This is controlled by `dejitter=True` (default) and `frames_per_rotation=6` on `MACE4DModel`.
 
 ## Timing Log
 
