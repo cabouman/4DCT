@@ -21,8 +21,10 @@ python recon_4d.py \
   --frames_per_rotation   6 \
   --frame_overlap_factor  2.0 \
   --max_mace_itr          10 \
-  --num_frames            25 \
   --downsample_row        1 \
   --downsample_column     1 \
   --subsample_view_factor 1 \
   2>&1 | tee ~/4dct_logs/recon_4d_run.log
+
+# To reconstruct only the first N frames (e.g. for a quick test), add:
+#   --num_frames 25 \

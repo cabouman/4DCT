@@ -60,7 +60,8 @@ def parse_args():
                    help="Number of frames that share any given view. Each frame "
                         "spans frame_overlap_factor * (360 / frames_per_rotation) degrees.")
     g.add_argument("--num_frames", type=int, default=None,
-                   help="Reconstruct only the first N time frames. Omit to use all frames.")
+                   help="Reconstruct only the first N time frames. Omit (default) to use all frames. "
+                        "If N exceeds the total frame count, all frames are used.")
 
     g = parser.add_argument_group("MACE algorithm")
     g.add_argument("--max_mace_itr", type=int, default=10, help="Maximum number of outer MACE iterations.")
@@ -130,9 +131,12 @@ def main():
     )
     print(f"Total frames: {len(sino_frames)}")
     if args.num_frames is not None:
-        sino_frames = sino_frames[:args.num_frames]
-        model_frames = model_frames[:args.num_frames]
-        print(f"Using first {len(sino_frames)} frames (--num_frames={args.num_frames}).")
+        if args.num_frames >= len(sino_frames):
+            print(f"[INFO] --num_frames={args.num_frames} >= total frames ({len(sino_frames)}); reconstructing all frames.")
+        else:
+            sino_frames = sino_frames[:args.num_frames]
+            model_frames = model_frames[:args.num_frames]
+            print(f"Using first {len(sino_frames)} frames (--num_frames={args.num_frames}).")
 
     print("\n************** Build 4D MACE model **************")
     mace_model = MACE4DModel(
