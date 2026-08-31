@@ -17,11 +17,18 @@ The docstrings are Google style and `napoleon` is enabled, so `autoclass`/`autom
 therefore mostly *placement*: telling Sphinx where these belong and writing the connective
 prose that autodoc cannot generate.
 
-One check to run first: `autodoc_default_options` and the `autodoc-skip-member` hook in
-`docs/source/conf.py` decide which members are emitted.  Confirm that `MACE4DModel`'s
-inherited `ParameterHandler` members render sensibly; every other documented model inherits
-`TomographyModel`, so this is the first `ParameterHandler`-only model in the docs and the
-inherited-member behavior has not been exercised.
+Two details of `docs/source/conf.py` that shape the work:
+
+* `autodoc_default_options` sets only `exclude-members: __init__`, and nothing turns on
+  `inherited-members`.  So `.. autoclass::` without `:members:` renders the class docstring
+  alone — the pattern `usr_denoising.rst` already uses.  `MACE4DModel` being the first
+  `ParameterHandler`-only model in the docs therefore raises no inherited-member question;
+  the constructor arguments must live in the class docstring, which they already do.
+* `conf.py` carries a `nitpick`-style list of unresolvable annotations
+  (`('py:class', 'mbirjax.utilities.ObjectType')` and similar).  `MACE4DParamNames` is a
+  module-level `Literal` alias used in the `get_params` overload, exactly the shape of the
+  entries already listed, so expect to add `('py:class', 'mbirjax.mace4d.MACE4DParamNames')`
+  there if the build warns.
 
 ## 2. New page: `docs/source/usr_mace4d.rst`
 
@@ -136,7 +143,8 @@ Check specifically:
 
 * No new warnings from the added pages (`make html` surfaces broken `:ref:` targets and
   malformed docstrings as warnings; treat any new one as a failure).
-* `MACE4DModel` renders its inherited `ParameterHandler` members acceptably (section 1).
+* No unresolved-reference warning for `MACE4DParamNames` (section 1); add the `conf.py`
+  entry if there is one.
 * The `Example:` blocks in the docstrings render as code, not as prose.
 
 ## 7. Suggested commit sequence
