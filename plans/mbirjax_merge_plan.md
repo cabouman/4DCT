@@ -90,9 +90,10 @@ inspect the per-frame sinograms and models before calling `recon()`.
 
 ## 3. Merge Steps
 
-### Step 1 — Fix three issues in the existing mbirjax code
+### Step 1 — Fix one issue in the existing mbirjax code
 
-These three issues must be resolved before `MACE4DModel` can be merged cleanly.
+One issue in the existing mbirjax code must be resolved before `MACE4DModel` can be
+merged cleanly.
 
 **Shared class-level logger.**  All models of one class share a single logger object.
 When `prox_map` runs concurrently across multiple threads, one thread can close a log
@@ -100,18 +101,12 @@ file handler while another thread is writing to it.  The fix is to give each mod
 instance its own logger, created in `__init__`.  This removes the need for
 `MACE4DModel` to overwrite the logger on each `ConeBeamModel` after construction.
 
-**Incorrect statistics in `auto_set_regularization_params`.**  Inside
-`QGGMRFDenoiser`, this method calls `subsample_views` with
-`num_real_views = sinogram_shape[0]`.  For a batch of hyperplanes, `sinogram_shape[0]`
-equals `nt` (the number of time frames), not the batch size.  The result is that
-regularization statistics are computed from the first hyperplane only, not from the
-full batch.  The fix is to add a path in `QGGMRFDenoiser` that computes statistics
-directly from the full array.
-
-**Direct call to a private method.**  `MACE4DModel` currently calls
-`QGGMRFDenoiser._denoise_single_device` directly, passing raw flat arrays.  Adding a
-public `denoise_batch(x, sigma)` method to `QGGMRFDenoiser` eliminates this dependency
-on a private method.
+The other two issues identified earlier (incorrect statistics in
+`auto_set_regularization_params` and direct calls to `_denoise_single_device`) do not
+require changes to mbirjax.  Both are handled within `MACE4DModel`'s own code:
+`_configure_denoiser` calls the individual `auto_set_*` methods directly on the full
+array, and `_batched_hyperplane_denoise` calls `_denoise_single_device` as internal
+code within the same package.
 
 ### Step 2 — Add `mbirjax/mace4d.py`
 
