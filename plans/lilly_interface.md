@@ -3,6 +3,12 @@
 Entry point for Lilly production runs. Launched via `bash demo_4d.sh` or directly as
 `python recon_4d.py --data_path <path>`.
 
+The reconstruction itself now lives in mbirjax as `mj.MACE4DModel`; `recon_4d.py` is the
+driver around it. Requires an mbirjax that includes `MACE4DModel` (branch
+`4DCT_for_merging` or later). Two flag changes from the pre-merge script: `--max_mace_itr`
+is now `--max_iterations`, and `--weight_type` is new (defaulting to the validated
+`transmission_root`). Everything else, including all defaults, is unchanged.
+
 ---
 
 ## Parameters Lilly needs to set
@@ -24,7 +30,9 @@ Entry point for Lilly production runs. Launched via `bash demo_4d.sh` or directl
 | `--subsample_view_factor` | `1` | View subsampling factor; increase to use fewer projection angles |
 | `--frames_per_rotation` | `6` | Time frames per full 360° rotation (one frame every 360/6 = 60°) |
 | `--frame_overlap_factor` | `2.0` | Number of frames that share any given view. Each frame spans `frame_overlap_factor * (360 / frames_per_rotation)` = 120° |
-| `--max_mace_itr` | `10` | Number of outer MACE iterations |
+| `--max_iterations` | `10` | Maximum number of outer MACE iterations (was `--max_mace_itr`) |
+| `--stop_threshold_change_pct` | `0.2` | Stop early when the consensus image changes by less than this percent between iterations. Set to `0` to always run `--max_iterations` |
+| `--weight_type` | `transmission_root` | Sinogram weighting, as in `mj.gen_weights`. `transmission_root` is the validated setting for this data |
 | `--output_path` | `./output` | Output directory |
 | `--num_frames` | *(all frames)* | Reconstruct only the first N time frames |
 
@@ -44,6 +52,7 @@ Entry point for Lilly production runs. Launched via `bash demo_4d.sh` or directl
 | `--serial` | *(off)* | Run all tasks on one device. By default all visible GPUs are used; restrict with `CUDA_VISIBLE_DEVICES` |
 | `--download_dir` | `./data` | Extraction directory when `--data_path` is a `.tgz` |
 | `--verbose` | `1` | 0 = silent, 1 = progress, 2 = debug |
+| `--gif_vmax` | `0.06` | Upper display bound for the output GIF, in attenuation units |
 
 ---
 
@@ -58,7 +67,9 @@ Entry point for Lilly production runs. Launched via `bash demo_4d.sh` or directl
 | `views_per_frame` | derived | `round(angle_span_per_frame / angle_step)`; angle_step comes from the model's view spacing |
 | `stride` | derived | `round(angle_stride / angle_step)` inside `construct_time_frames()`              |
 
-`frames_per_rotation` also sets the period of the temporal dejitter filter in `MACE4DModel` (the jitter introduced by sinogram gating repeats once per rotation). Internally all angles are radians. The sinogram weighting scheme is fixed at `"transmission_root"` (default in `MACE4DModel`).
+`frames_per_rotation` also sets the period of the temporal dejitter filter in `MACE4DModel` (the jitter introduced by sinogram gating repeats once per rotation). Internally all angles are radians.
+
+Weighting is no longer fixed inside the model. `MACE4DModel.recon` follows `TomographyModel.recon`, where `weights=None` means unit weights; `recon_4d.py` therefore builds the weights itself with one `mj.gen_weights` call and `--weight_type` selects the scheme. The default is still `transmission_root`, so leaving the flag alone reproduces the previous behavior.
 
 > **Slurm note:** the reconstruction is not hard-coded to a fixed GPU count —
 > `devices=None` (the default) uses however many GPUs are visible, from 1 up
@@ -70,6 +81,9 @@ Entry point for Lilly production runs. Launched via `bash demo_4d.sh` or directl
 ---
 
 ## Reference run: size and timing
+
+These figures are from the **pre-merge** code and have not yet been reproduced on the
+merged version; they remain the best available reference point.
 
 Measured on the `Phantom_30s_Run1_Dec2024` dataset at full resolution
 (`--downsample_row 1 --downsample_column 1 --subsample_view_factor 1`),
@@ -98,7 +112,8 @@ iteration during development.
 | File | Description |
 |---|---|
 | `recon_4d_<time>h.npy` | Final 4D reconstruction, shape `(nt, nx, ny, nz)` |
-| `init/init_image.npy` | Per-frame MBIR initialization; reused automatically on re-runs when its shape matches |
+| `init/init_recon.npy` | Per-frame MBIR initialization; reused automatically on re-runs when its shape matches. **Renamed from `init_image.npy`** — an existing cache under the old name is not found and is recomputed (15-20 min); rename it to reuse it |
 | `logs/run_info.txt` | Human-readable summary of all run settings |
 | `logs/timing_log.csv` | Per-iteration prox/denoise/makespan times and consensus change (%) |
 | `logs/task_log.csv` | One row per task: iteration, kind, index, device, start, end |
+| `recon_4d.gif` | The middle x slice (YZ plane) playing over time; `--gif_vmax` sets the display range |
