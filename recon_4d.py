@@ -29,8 +29,6 @@ import mbirjax as mj
 import mbirjax.preprocess as mjp
 import numpy as np
 
-from mace4d import MACE4DModel, construct_time_frames, gen_gif_and_save
-
 
 def parse_args():
     """Command-line interface. Defaults are the validated values for the 4DCT phantom."""
@@ -64,12 +62,20 @@ def parse_args():
                         "If N exceeds the total frame count, all frames are used.")
 
     g = parser.add_argument_group("MACE algorithm")
-    g.add_argument("--max_mace_itr", type=int, default=10, help="Maximum number of outer MACE iterations.")
+    g.add_argument("--max_iterations", type=int, default=10, help="Maximum number of outer MACE iterations.")
+    g.add_argument("--stop_threshold_change_pct", type=float, default=0.2,
+                   help="Stop when the consensus image changes by less than this percent between "
+                        "iterations. Set to 0 to always run max_iterations.")
     g.add_argument("--mace_prior_weight", type=float, default=0.5, help="Total weight of the three prior agents.")
     g.add_argument("--rho_mann", type=float, default=0.5, help="Mann iteration step size (ADMM rho).")
     g.add_argument("--prox_num_iterations", type=int, default=3, help="Max prox_map iterations per MACE step.")
     g.add_argument("--prox_stop_threshold", type=float, default=0.02, help="Prox_map convergence threshold.")
     g.add_argument("--sigma_prox", type=float, default=None, help="Proximal map sigma. Omit for automatic selection.")
+    g.add_argument("--weight_type", type=str, default="transmission_root",
+                   choices=["unweighted", "transmission", "transmission_root", "emission"],
+                   help="Sinogram weighting, as in mj.gen_weights. transmission_root is the "
+                        "validated setting for 4D transmission data; 'unweighted' passes "
+                        "weights=None, which is the same as all-ones weights without the array.")
     g.add_argument("--no_dejitter", action="store_true", help="Disable the DCT-I temporal dejitter.")
 
     g = parser.add_argument_group("execution")
@@ -99,6 +105,7 @@ def append_run_info(log_dir, args, dataset_dir, num_frames, run_time_h, out_path
         f.write(f"frames_per_rotation  = {args.frames_per_rotation}\n")
         f.write(f"frame_overlap_factor = {args.frame_overlap_factor}\n")
         f.write(f"num_frames           = {num_frames}\n")
+        f.write(f"weight_type          = {args.weight_type}\n")
         f.write(f"sharpness            = {args.sharpness}\n")
         f.write(f"total wall time      = {run_time_h:.2f} h\n")
         f.write(f"recon saved to       = {out_path}\n")
@@ -122,41 +129,41 @@ def main():
     )
     ct_model.set_params(sharpness=args.sharpness, positivity_flag=True, verbose=args.verbose)
 
-    print("\n************** Construct time frames **************")
-    sino_frames, model_frames = construct_time_frames(
-        sino=sino,
-        model=ct_model,
+    print("\n************** Build 4D MACE model **************")
+    # The frame structure follows from the model's angles alone, so it is fixed here; the
+    # sinogram enters at recon() below.
+    mace_model = mj.MACE4DModel(
+        ct_model,
         frames_per_rotation=args.frames_per_rotation,
         frame_overlap_factor=args.frame_overlap_factor,
+        num_frames=args.num_frames,
     )
-    print(f"Total frames: {len(sino_frames)}")
-    if args.num_frames is not None:
-        if args.num_frames >= len(sino_frames):
-            print(f"[INFO] --num_frames={args.num_frames} >= total frames ({len(sino_frames)}); reconstructing all frames.")
-        else:
-            sino_frames = sino_frames[:args.num_frames]
-            model_frames = model_frames[:args.num_frames]
-            print(f"Using first {len(sino_frames)} frames (--num_frames={args.num_frames}).")
-
-    print("\n************** Build 4D MACE model **************")
-    mace_model = MACE4DModel(
-        sino_list=sino_frames,
-        model_list=model_frames,
+    mace_model.set_params(
         mace_prior_weight=args.mace_prior_weight,
         rho_mann=args.rho_mann,
-        max_mace_itr=args.max_mace_itr,
         prox_num_iterations=args.prox_num_iterations,
         prox_stop_threshold=args.prox_stop_threshold,
         sigma_prox=args.sigma_prox,
         dejitter=not args.no_dejitter,
-        frames_per_rotation=args.frames_per_rotation,
         verbose=args.verbose,
     )
+    if args.serial:
+        mace_model.configure_devices(1)
+    print(f"Time frames: {mace_model.nt} "
+          f"({mace_model.view_slices[0].stop - mace_model.view_slices[0].start} views each)")
+
+    # transmission_root is the validated weighting for 4D data; the model itself defaults to
+    # unit weights, following TomographyModel.recon, so the choice is made explicitly here.
+    weights = (None if args.weight_type == "unweighted"
+               else mj.gen_weights(sino, weight_type=args.weight_type))
 
     print("\n************** Run 4D MACE reconstruction **************")
     time0 = time.time()
-    recon_4d = mace_model.recon(
-        devices=1 if args.serial else None,
+    recon_4d, recon_dict = mace_model.recon(
+        sino,
+        weights=weights,
+        max_iterations=args.max_iterations,
+        stop_threshold_change_pct=args.stop_threshold_change_pct,
         init_dir=init_dir,
         log_dir=log_dir,
     )
@@ -165,13 +172,17 @@ def main():
     out_path = os.path.abspath(os.path.join(output_path, f"recon_4d_{run_time_h:.2f}h.npy"))
     np.save(out_path, recon_4d)
     print(f"\n[INFO] Total wall time: {run_time_h:.2f} hours.")
+    print(f"[INFO] Iterations run: {recon_dict['recon_params']['iterations completed']} "
+          f"of {args.max_iterations}.")
     print(f"[INFO] Recon saved to: {out_path}")
     print(f"[INFO] Logs:           {os.path.abspath(log_dir)}")
 
-    append_run_info(log_dir, args, dataset_dir, len(sino_frames), run_time_h, out_path)
+    append_run_info(log_dir, args, dataset_dir, mace_model.nt, run_time_h, out_path)
 
+    # One x slice (the YZ plane through the middle of the volume) stepping through time.
     gif_path = os.path.join(output_path, "recon_4d.gif")
-    gen_gif_and_save(recon_4d, gif_path)
+    mj.save_volume_as_gif(recon_4d[:, recon_4d.shape[1] // 2], gif_path,
+                          vmin=0, vmax=0.06, titles="t={}", fps=7)
     print(f"[INFO] GIF saved to:   {os.path.abspath(gif_path)}")
 
 

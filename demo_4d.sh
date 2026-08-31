@@ -20,7 +20,8 @@ python recon_4d.py \
   --output_path           "$OUTPUT_PATH" \
   --frames_per_rotation   6 \
   --frame_overlap_factor  2.0 \
-  --max_mace_itr          10 \
+  --max_iterations        10 \
+  --weight_type           transmission_root \
   --downsample_row        1 \
   --downsample_column     1 \
   --subsample_view_factor 1 \
