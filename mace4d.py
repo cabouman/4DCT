@@ -807,18 +807,23 @@ _DENOISE_BATCH_CAP = 128
 _SIGMA_X_FLOOR = 1e-6
 
 
-def _auto_set_regularization_params_full_batch(denoiser, image_for_stats):
-    """Auto-set sigma_y/sigma_x/sigma_prox from the whole stats array.
+def _configure_denoiser(denoiser, sigma, image_for_stats):
+    """Set the shared sigma and the regularization constants on the denoiser.
+
+    Replicates the parameter setup that QGGMRFDenoiser.denoise() performs, so
+    the jitted sweep can be called directly with shared constants.
 
     QGGMRFDenoiser.auto_set_regularization_params() (inherited from
-    TomographyModel) internally calls subsample_views(..., num_real_views=
-    sinogram_shape[0]). For a per-orientation batch of hyperplanes merged
-    into one array with the hyperplane axis first, sinogram_shape[0] is nt
-    (one hyperplane's time-frame count), not the batch size — so that call
-    silently uses only the first hyperplane's statistics instead of the
-    whole batch. This computes the same statistics directly on the full
-    array instead, and floors sigma_x so it cannot come out at zero.
+    TomographyModel) calls subsample_views with num_real_views=sinogram_shape[0],
+    which equals nt for a hyperplane batch — not the batch size — so it would
+    use only the first hyperplane's statistics. The individual auto-set methods
+    are called directly on the full array instead. At merge time these calls
+    become overrides of auto_set_regularization_params and auto_set_sigma_x
+    inside QGGMRFDenoiser in mbirjax.
     """
+    denoiser.set_params(use_ror_mask=False, sigma_noise=float(sigma))
+    verbose = denoiser.get_params('verbose')
+    denoiser.set_params(verbose=0)
     image_for_stats = np.asarray(image_for_stats)
     sino_indicator = denoiser._get_sino_indicator(image_for_stats)
     denoiser.auto_set_sigma_y(image_for_stats, sino_indicator)
@@ -830,18 +835,6 @@ def _auto_set_regularization_params_full_batch(denoiser, image_for_stats):
     sigma_x = denoiser.get_params('sigma_x')
     if not np.isfinite(sigma_x) or sigma_x < _SIGMA_X_FLOOR:
         denoiser.set_params(no_warning=True, sigma_x=np.float32(_SIGMA_X_FLOOR))
-
-
-def _configure_denoiser(denoiser, sigma, image_for_stats):
-    """Set the shared sigma and the regularization constants on the denoiser.
-
-    Replicates the parameter setup that QGGMRFDenoiser.denoise() performs, so
-    the jitted sweep can be called directly with shared constants.
-    """
-    denoiser.set_params(use_ror_mask=False, sigma_noise=float(sigma))
-    verbose = denoiser.get_params('verbose')
-    denoiser.set_params(verbose=0)
-    _auto_set_regularization_params_full_batch(denoiser, image_for_stats)
     denoiser.set_params(verbose=verbose)
     # The sweep's progress callback converts its arguments with int()/float(),
     # which fails on the batched arrays a vmapped sweep passes it; silence it.
