@@ -1,5 +1,12 @@
 # MACE4DModel — mbirjax Merge Plan
 
+> **Status: implemented.**  All seven steps below are merged on the mbirjax branch
+> `4DCT_for_merging` (`ba42ee6` logger, `89faa06` utilities + GIF, `4686a2d` MACE4DModel,
+> `87b784d` tests) and this repo's branch `refactor_for_mbirjax` (`1f07db6` driver).
+> Section 5 records where the implementation departed from this plan and what the
+> implementation turned up.  Documentation is planned separately in
+> [mbirjax_docs_plan.md](mbirjax_docs_plan.md).
+
 ## 1. Parameter Classification
 
 mbirjax assigns parameters to one of four categories: constructor arguments,
@@ -275,3 +282,79 @@ one `gen_weights` line; `recon_4d.py` does this via a `--weight_type` flag defau
 to `transmission_root`.  The `recon()` docstring and the demo state prominently that
 `transmission_root` is the validated setting for 4D data, so the unweighted default is
 not mistaken for the recommended configuration.
+
+---
+
+## 5. Implementation Record
+
+### Departures from the plan
+
+**Frame-utility tests live in `tests/test_utilities.py`, not `test_mace4d.py`** (Step 6).
+`construct_time_frames` is now an `mbirjax.utilities` function, so its tests belong with the
+other utilities tests and must pass whether or not `mace4d` is importable.  `test_mace4d.py`
+still covers the agreement between a model's `view_slices` and the wrapper's sinogram frames,
+which is the coupling the plan wanted tested.
+
+**`recon_shape` comes from the frame models, not `ct_model`** (Step 2).  The frame models are
+the ones that produce the volumes, and this preserves the pre-merge behavior.  Consequence
+worth knowing: `copy_ct_model` drops a user-pinned `recon_shape` and recomputes it from the
+frame's sinogram shape, so pinning `recon_shape` on `ct_model` does not carry into the frames.
+This was already true before the merge.
+
+**`mace4d.py` declares `__all__`** (Step 2).  No other mbirjax module does, but without it the
+package's star import would publish `scipy.fft.dct`, `importlib_version` and the typing names
+as `mj.` attributes.
+
+**The initialization cache file is `init_recon.npy`, not `init_image.npy`** (Step 2),
+following the `init_image` -> `init_recon` argument rename.  Existing 4DCT caches are ignored
+and recomputed once.
+
+**`save_volume_as_gif` gained `titles` and `fps`** (Step 4); it already had `vmin`/`vmax`, so
+the configurable colormap range the plan asked for was already present.  `gen_gif_and_save`
+was dropped rather than moved, and the driver calls `save_volume_as_gif` on the middle x
+slice.
+
+### Resolved during implementation
+
+**`sigma_prox` registration** (Step 2, open question).  Registering it as-is trips
+`ParameterHandler`'s "you have disabled auto-regularization" warning, which is meaningless for
+a model that performs no reconstruction of its own.  `MACE4DModel.set_params` therefore routes
+that one name past the base class's regularization branch; a test asserts the warning does not
+appear.  All other names go through the base class unchanged, so an unknown parameter is still
+rejected.
+
+**Logger fix** (Step 1).  `setup_logger` now builds an unregistered `logging.Logger` under a
+per-instance name, so a second instance cannot obtain it — the race is structurally impossible
+rather than merely unlikely.  The existing instance logger is reused rather than replaced, so
+the handler close/remove pass still prevents leaked file descriptors.  `_silence_model_logging`
+is deleted, as planned.
+
+### Found by the port
+
+**A constant `init_recon` produced `ZeroDivisionError`.**  An all-zero or constant initial
+image gives a zero noise estimate, which divides through to the qGGMRF forward-model constant
+three calls deeper.  `recon` now checks the estimated sigma and reports the cause.
+
+**The pre-merge prior-weight test compared floats exactly.**  `_normalize_prior_weights([0.1,
+0.2, 0.3])` returns `0.3999999999999999`, not `0.4`.  The ported test uses `np.allclose`.
+
+### Verification
+
+* 28 CPU tests in `tests/test_mace4d.py`, plus 9 new tests in `test_utilities.py` and 4 in
+  `test_logging.py`.
+* The threaded multi-device path runs on 2 virtual CPU devices, asserting both devices ran
+  tasks — the first test of the logger fix under concurrency.
+* `recon_4d.py`'s `main()` runs end to end against a stubbed NSI preprocessor, producing the
+  recon, GIF, init cache and both sections of `run_info.txt`.
+
+### Not verified here
+
+* **Multi-GPU.**  Concurrency is exercised at 2 virtual CPU devices, not 4 GPUs with real
+  collectives.  The deadlock the device pinning prevents cannot occur on CPU, so that guard
+  is still only argued, not tested.
+* **Full-resolution agreement.**  No run on the Lilly phantom has been compared against a
+  pre-merge reference reconstruction.  Worth doing before this branch merges to `main`: the
+  interface changed, and only a full-resolution comparison shows the numerics did not.
+* **`stop_threshold_change_pct=0.2` on real data.**  The plan states reference runs stay above
+  this threshold through 10 iterations; that has not been re-checked on this branch, so a
+  production run could now stop early where the pre-merge code would not.
