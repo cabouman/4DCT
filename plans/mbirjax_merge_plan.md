@@ -204,13 +204,8 @@ Convert all docstrings from NumPy style to Google style (`Args:`, `Returns:`, `R
 
 ## 5. Open Questions
 
-Two questions remain unresolved before the merge can be finalized.
+One question remains unresolved before the merge can be finalized.
 
 **`weight_type` registration.**  This parameter is not currently registered in
 mbirjax's parameter system.  It can be added to the registry, or kept as a plain
 constructor keyword that is not accessible via `set_params`.
-
-**`frames_per_rotation` scope.**  This parameter serves two roles: it sets the period
-of the temporal dejitter filter in `MACE4DModel`, and it is an input to
-`construct_time_frames`.  Keeping it on the model is appropriate because the jitter
-period is a property of the acquisition protocol, not of a single function call.
