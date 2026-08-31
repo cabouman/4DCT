@@ -11,16 +11,22 @@ and optional arguments to `recon()`.  The tables below place each parameter of
 
 | Parameter | Type | Notes |
 |-----------|------|-------|
-| `model_list` | `list[ConeBeamModel]` | One model per time frame; encodes the scan geometry for that frame. |
+| `sino` | ndarray | Full sinogram, shape `(num_views, det_rows, det_cols)`. Frame splitting runs at construction time via `construct_time_frames`. |
+| `model` | `mbirjax.ConeBeamModel` | Fully-built model for the full scan. Per-frame models are derived at construction time. |
 
-`sino_list` moves to `recon()` as a required argument (Category 3).  This change
-follows the mbirjax convention that sinogram data is passed at call time, not at
-construction.  Weights are computed at the start of `recon()` instead of in `__init__`.
+The constructor calls `construct_time_frames(sino, model, frames_per_rotation,
+frame_overlap_factor)` internally to produce the per-frame sinograms, per-frame models,
+and sinogram weights.  These are stored as attributes (`self.sino_list`,
+`self.model_list`, `self.weights_list`) and are ready when construction finishes.
+`construct_time_frames` remains a public module-level function for users who want to
+inspect the per-frame data before reconstruction.
 
 ### Category 2 — Optional constructor arguments, managed via `set_params`
 
 | Parameter | Default | Meaning |
 |-----------|---------|---------|
+| `frames_per_rotation` | `6` | Number of time frames per full rotation.  Sets the stride for frame splitting and the period of the temporal dejitter filter. |
+| `frame_overlap_factor` | `2.0` | Number of frames that share any given view.  Each frame spans `frame_overlap_factor × (360 / frames_per_rotation)` degrees. |
 | `mace_prior_weight` | `0.5` | Total weight of the three prior agents.  A scalar `w` maps to weights `[1−w, w/3, w/3, w/3]` across `[fwd, xyt, yzt, xzt]`.  A three-element list `[w0, w1, w2]` sets each prior weight independently. |
 | `rho_mann` | `0.5` | Mann iteration step size (ADMM ρ). |
 | `max_mace_itr` | `10` | Number of outer MACE iterations. |
@@ -28,15 +34,13 @@ construction.  Weights are computed at the start of `recon()` instead of in `__i
 | `prox_stop_threshold` | `0.02` | `prox_map` convergence threshold, expressed as percent change. |
 | `sigma_prox` | `None` | Proximal sigma.  `None` lets mbirjax select a value automatically. |
 | `dejitter` | `True` | Apply DCT-I temporal dejitter inside each agent. |
-| `frames_per_rotation` | `6` | Number of time frames per full rotation.  This value sets the period of the temporal dejitter filter. |
 | `weight_type` | `"transmission_root"` | Sinogram weight type passed to `gen_weights`. |
 | `verbose` | `1` | Verbosity level.  `0` = silent, `1` = progress, `2` = debug.  Already registered in mbirjax's parameter system. |
 
 ### Category 3 — Required `recon()` arguments
 
-| Parameter | Type | Notes |
-|-----------|------|-------|
-| `sino_list` | `list[ndarray]` | Per-frame sinograms.  Each array has shape `(views_per_frame, det_rows, det_cols)`. |
+None.  Under this interface the sinogram enters at construction time, so `recon()` takes
+no required data arguments.
 
 ### Category 4 — Optional `recon()` arguments
 
@@ -49,93 +53,42 @@ construction.  Weights are computed at the start of `recon()` instead of in `__i
 
 ---
 
-## 2. Open Interface Question — Where Does `construct_time_frames` Run?
+## 2. Interface Decision — Sinogram Enters at Construction Time
 
-The current code calls `construct_time_frames` as a separate step before constructing
-`MACE4DModel`.  Moving this call inside the model is cleaner for the user, but it raises
-a question about where the full sinogram `sino` enters: at construction time or at
-`recon()` time.  The two options have different tradeoffs.
+We considered two options: passing `sino` to the constructor (Option A) or passing it
+to `recon()` (Option B, which matches the ConeBeamModel convention).  We chose Option A.
 
-### Option A — Sinogram enters at construction time
+The reason is that `MACE4DModel` is always constructed immediately after the full CT
+model is built, with the sinogram already in hand.  Unlike `ConeBeamModel`, which can be
+reused with different sinograms, `MACE4DModel` is tied to one specific 4D acquisition.
+Frame splitting and weight computation are initialization work, not reconstruction work —
+they determine the model's structure and are fixed for the object's lifetime.  Doing them
+at construction time gives the object a fully defined state from the moment it is created.
+
+### Proposed interface
 
 ```python
+# Construction: frame splitting and weight computation happen here
 mace = mj.MACE4DModel(
     sino=sino,
     model=ct_model,
     frames_per_rotation=6,
     frame_overlap_factor=2.0,
     mace_prior_weight=0.5,
+    max_mace_itr=10,
 )
+mace.set_params(rho_mann=0.5, dejitter=True)
+
+# Reconstruction: no sinogram argument needed
 recon_4d = mace.recon(init_dir="./output/init", log_dir="./output/logs")
 ```
 
-`construct_time_frames` runs inside `__init__`, producing `sino_list` and `model_list`
-as internal state.  The user never calls `construct_time_frames` directly.  This is the
-simplest interface and requires the fewest steps.
-
-The tradeoff is that sinogram data enters at construction time.  This deviates from
-the mbirjax convention, where the constructor receives geometry and `recon()` receives
-data.
-
-### Option B — Sinogram enters at `recon()` time
-
-```python
-mace = mj.MACE4DModel(
-    model=ct_model,
-    frames_per_rotation=6,
-    frame_overlap_factor=2.0,
-    mace_prior_weight=0.5,
-)
-recon_4d = mace.recon(sino, init_dir="./output/init", log_dir="./output/logs")
-```
-
-`construct_time_frames` runs inside `recon()`.  The constructor receives geometry only,
-and `sino` is passed to `recon()` as its first required argument.  This matches the
-mbirjax convention exactly: `ConeBeamModel.__init__` takes geometry, and
-`ConeBeamModel.recon(sinogram, ...)` takes data.
-
-The tradeoff is that `construct_time_frames` is no longer a standalone utility.  A user
-who wants to inspect the per-frame sinograms or models before running the reconstruction
-must call `construct_time_frames` separately, which means it still needs to be exported
-as a public function.
-
-### Comparison
-
-| | Option A | Option B |
-|---|---|---|
-| Steps for the user | fewer | more |
-| Matches mbirjax convention | no | yes |
-| `construct_time_frames` stays public | no | yes (still needed for inspection) |
-| Sinogram data in constructor | yes | no |
-
-The parameter tables in Section 1 reflect Option B.  Under Option A, `sino` moves from
-Category 3 (`recon()` required) to Category 1 (constructor required), and
-`frame_overlap_factor` moves from Category 2 to Category 1 alongside `frames_per_rotation`.
+`construct_time_frames` remains a public module-level function for users who want to
+inspect the per-frame sinograms and models before calling `recon()`.
 
 ---
 
-## 3. Proposed Interface (Option B)
-
-The interface below assumes Option B.  It follows the mbirjax convention of passing
-geometry to the constructor and data to `recon()`.
-
-```python
-# Construction (geometry only)
-mace = mj.MACE4DModel(model=ct_model, frames_per_rotation=6, frame_overlap_factor=2.0,
-                      mace_prior_weight=0.5, max_mace_itr=10)
-mace.set_params(rho_mann=0.5, dejitter=True)
-
-# Reconstruction (sinogram data passed here)
-recon_4d = mace.recon(sino, init_dir="./output/init", log_dir="./output/logs")
-```
-
-Under Option B, `construct_time_frames` remains a public module-level function so that
-users can inspect per-frame sinograms and models before reconstruction.  This is
-consistent with how mbirjax exposes utilities such as `copy_ct_model` and `gen_weights`.
-
----
-
-## 4. Merge Steps
+## 3. Merge Steps
 
 ### Step 1 — Fix three issues in the existing mbirjax code
 
@@ -166,6 +119,9 @@ on a private method.
 orchestrates other models but does not perform projections itself.  The Category 2
 parameters listed above are registered in `__init__` via `set_params`.
 
+The constructor takes `sino` and `model`, calls `construct_time_frames` internally, and
+stores the resulting per-frame sinograms, models, and weights as attributes.
+
 The following helper functions move into this file because they have no dependencies
 outside `MACE4DModel`: `_dejitter_4d_dct`, `_normalize_prior_weights`, `_assign_tasks`,
 `_resolve_devices`, `_denoiser_wrapper`, and `_batched_hyperplane_denoise`.
@@ -189,10 +145,12 @@ Export `MACE4DModel` and `construct_time_frames`.
 
 ### Step 6 — Port the tests
 
-Move `tests/test_mace4d.py` to `mbirjax/tests/test_mace4d.py`.  Update the `recon()`
-call to pass `sino_list` as the first positional argument.  The existing test coverage
-is otherwise unchanged: it covers time-frame construction, dejitter correctness, task
-assignment, batched denoising, end-to-end serial reconstruction, and the init image cache.
+Move `tests/test_mace4d.py` to `mbirjax/tests/test_mace4d.py`.  Update the
+`MACE4DModel` constructor call to pass `sino` and `model` directly instead of
+pre-split `sino_list` and `model_list`.  Update `recon()` calls to remove the
+`sino_list` argument.  The existing test coverage is otherwise unchanged: it covers
+time-frame construction, dejitter correctness, task assignment, batched denoising,
+end-to-end serial reconstruction, and the init image cache.
 
 ### Step 7 — Update docstrings and documentation ✓ (docstrings done)
 
@@ -203,7 +161,7 @@ mbirjax.  Remaining work at merge time: update `README.md`, `demo_4d.sh`, and
 
 ---
 
-## 5. Open Questions
+## 4. Open Questions
 
 One question remains unresolved before the merge can be finalized.
 
