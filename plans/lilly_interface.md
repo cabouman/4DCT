@@ -39,7 +39,7 @@ Entry point for Lilly production runs. Launched via `bash demo_4d.sh` or directl
 | `--prox_num_iterations` | `3` | Max prox_map iterations per MACE step |
 | `--prox_stop_threshold` | `0.02` | Prox_map convergence threshold (% change) |
 | `--sharpness` | `1.0` | Sharpness parameter passed to `ct_model` |
-| `--sigma_p` | *(auto)* | Proximal sigma; omit for automatic selection |
+| `--sigma_prox` | *(auto)* | Proximal sigma; omit for automatic selection |
 | `--no_dejitter` | *(off)* | Disables the DCT-I temporal dejitter |
 | `--serial` | *(off)* | Run all tasks on one device. By default all visible GPUs are used; restrict with `CUDA_VISIBLE_DEVICES` |
 | `--download_dir` | `./data` | Extraction directory when `--data_path` is a `.tgz` |
