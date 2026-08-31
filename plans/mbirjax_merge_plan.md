@@ -309,10 +309,16 @@ as `mj.` attributes.
 following the `init_image` -> `init_recon` argument rename.  Existing 4DCT caches are ignored
 and recomputed once.
 
-**`save_volume_as_gif` gained `titles` and `fps`** (Step 4); it already had `vmin`/`vmax`, so
-the configurable colormap range the plan asked for was already present.  `gen_gif_and_save`
-was dropped rather than moved, and the driver calls `save_volume_as_gif` on the middle x
-slice.
+**Step 4 was reversed: 4D gets its own GIF writer.**  The plan called for folding
+`gen_gif_and_save`'s features into `save_volume_as_gif`.  That was wrong.  `save_volume_as_gif`
+iterates axis 0 of a *3D* volume -- a spatial axis, displayed transposed -- while a 4D volume
+always plays over time on axis 0 and displays a fixed *spatial* slice in its natural
+orientation.  The same array position means different things in the two cases, so one function
+cannot serve both without misleading its 3D callers.  `save_volume_as_gif` is therefore
+unchanged, and `save_4d_volume_as_gif(volume, filename, slice_axis=1, slice_index=None, ...)`
+is new: `slice_axis` is 1, 2 or 3, `slice_index` defaults to the middle of that axis, and
+`slice_axis=0` is rejected because time is never a display axis.  (Ziyun caught this,
+2026-08-31.)
 
 ### Resolved during implementation
 

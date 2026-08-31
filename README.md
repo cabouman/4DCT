@@ -29,6 +29,7 @@ Output is written to `./output/`:
 - `init/init_recon.npy` — per-frame MBIR initialization (saved for potential reuse)
 - `logs/run_info.txt` — human-readable summary of all run settings
 - `logs/timing_log.csv` — per-iteration agent timing and consensus change
+- `recon_4d.gif` — the middle x slice playing over time (`--gif_vmax` sets the display range)
 
 On a second run with the same settings, the saved initialization in `output/init/` is detected and reused automatically; if its shape does not match the run, it is recomputed with a warning.
 

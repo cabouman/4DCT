@@ -94,7 +94,7 @@ Include the complete worked example from the class docstring, extended with the
 |------|------|
 | `docs/source/usr_api.rst` | Add `:ref:`MACE4DDocs`` to the bullet list and `usr_mace4d` to the hidden toctree, after `usr_denoising`. |
 | `docs/source/usr_api_overview.rst` | New "4D Reconstruction" section after "Denoising", with an `autosummary` for `MACE4DModel.recon` and one sentence on when to use it. |
-| `docs/source/usr_utilities.rst` | Add `construct_time_frames` and `construct_time_frame_models` under "General Purpose", next to `copy_ct_model`. |
+| `docs/source/usr_utilities.rst` | Add `construct_time_frames` and `construct_time_frame_models` under "General Purpose", next to `copy_ct_model`.  Add `save_4d_volume_as_gif` under "3D Data Viewer" beside `save_volume_as_gif`, with one line distinguishing them: axis 0 is a spatial axis in the 3D writer and time in the 4D one. |
 | `docs/source/usr_parameters.rst` | New "4D MACE Parameters" section documenting `mace_prior_weight`, `rho_mann`, `prox_num_iterations`, `prox_stop_threshold`, `dejitter` in the page's existing `:Type:` format, each with a `.. _param-<name>:` anchor. Note that `sigma_prox` and `verbose` are shared with the base parameters. |
 | `docs/source/usr_multi_gpu.rst` | Short subsection: 4D uses one task per device (one worker thread each), not the sharded layout the rest of the page describes, and every per-frame model and denoiser is pinned with `configure_devices([device])`. Say why: auto-sharding inside concurrent threads opens one collective clique per thread and deadlocks. |
 | `docs/source/demos_and_faqs.rst` | Link the 4D demo added in section 4. |
@@ -127,7 +127,9 @@ Three user-visible changes from this merge belong in the release notes, none of 
 discoverable from the API pages:
 
 * `MACE4DModel`, `construct_time_frames`, `construct_time_frame_models` are new.
-* `save_volume_as_gif` gains `titles` and `fps`.
+* `save_4d_volume_as_gif` is new, for a 4D volume playing over time on axis 0 with one
+  fixed spatial slice.  `save_volume_as_gif` is unchanged and remains the 3D writer;
+  the release notes should say which is which, since the names are close.
 * Model loggers are now per instance rather than per class.  Anyone configuring mbirjax
   logging by class name (`logging.getLogger('ConeBeamModel')`) no longer reaches the model's
   logger.  This is the only behavior change that can break an existing setup.

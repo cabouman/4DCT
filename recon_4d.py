@@ -83,6 +83,8 @@ def parse_args():
                    help="Run all tasks on one device (alias for one-device mode). "
                         "By default all visible GPUs are used; restrict them with CUDA_VISIBLE_DEVICES.")
     g.add_argument("--verbose", type=int, default=1, help="0 = silent, 1 = progress, 2 = debug.")
+    g.add_argument("--gif_vmax", type=float, default=0.06,
+                   help="Upper display bound for the output GIF, in units of attenuation.")
 
     return parser.parse_args()
 
@@ -179,10 +181,9 @@ def main():
 
     append_run_info(log_dir, args, dataset_dir, mace_model.nt, run_time_h, out_path)
 
-    # One x slice (the YZ plane through the middle of the volume) stepping through time.
+    # The middle x slice (the YZ plane through the center) stepping through time.
     gif_path = os.path.join(output_path, "recon_4d.gif")
-    mj.save_volume_as_gif(recon_4d[:, recon_4d.shape[1] // 2], gif_path,
-                          vmin=0, vmax=0.06, titles="t={}", fps=7)
+    mj.save_4d_volume_as_gif(recon_4d, gif_path, slice_axis=1, vmin=0, vmax=args.gif_vmax)
     print(f"[INFO] GIF saved to:   {os.path.abspath(gif_path)}")
 
 
