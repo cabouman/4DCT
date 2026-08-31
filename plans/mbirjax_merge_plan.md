@@ -37,7 +37,6 @@ construction.
 | `prox_stop_threshold` | `0.02` | `prox_map` convergence threshold, expressed as percent change. |
 | `sigma_prox` | `None` | Proximal sigma.  `None` lets mbirjax select a value automatically. |
 | `dejitter` | `True` | Apply DCT-I temporal dejitter inside each agent. |
-| `weight_type` | `"transmission_root"` | Weight type used by `gen_weights` when `recon()` is called with `weights=None`.  Ignored when an explicit weights array is passed.  One of `'unweighted'`, `'transmission'`, `'transmission_root'`, `'emission'`. |
 | `verbose` | `1` | Verbosity level.  `0` = silent, `1` = progress, `2` = debug.  Already registered in mbirjax's parameter system. |
 
 Note that iteration control for the outer MACE loop is **not** here: following the
@@ -54,10 +53,10 @@ are `recon()` arguments (Category 4).
 
 | Parameter | Default | Meaning |
 |-----------|---------|---------|
-| `weights` | `None` | Full-sinogram-shaped weights array, sliced per frame internally (views).  `None` generates weights once on the full sinogram via `gen_weights(sinogram, weight_type)` and slices the result.  **Documented deviation from the base class**, where `weights=None` means unit weights; unit weights here are available via `set_params(weight_type='unweighted')`.  An explicit array supports custom weighting (defective detector columns, `gen_weights_mar`, etc.). |
+| `weights` | `None` | Full-sinogram-shaped weights array, sliced per frame internally (views).  `None` means unit weights, exactly as in `TomographyModel.recon` (internally, `None` is forwarded to each frame's `prox_map`).  The validated 4D configuration uses `gen_weights(sinogram, 'transmission_root')`, applied explicitly by the caller; the docstring example and demo script make this prominent so the unweighted default is not mistaken for the recommended configuration.  An explicit array supports custom weighting (defective detector columns, `gen_weights_mar`, etc.). |
 | `init_recon` | `None` | A 4D array of shape `(nt, nx, ny, nz)` to use as the starting point (mbirjax name; was `init_image`).  When provided, the per-frame MBIR initialization is skipped. |
 | `max_iterations` | `10` | Number of outer MACE iterations (was `max_mace_itr`). |
-| `stop_threshold_change_pct` | `0` | Stop the outer loop when the per-iteration consensus change (already computed and logged as `consensus_change_pct`) falls below this percentage.  Default `0` runs exactly `max_iterations`, preserving the validated Lilly behavior; the base-class default of `0.2` was not adopted so that existing reference runs remain reproducible. |
+| `stop_threshold_change_pct` | `0.2` | Stop the outer loop when the per-iteration consensus change (already computed and logged as `consensus_change_pct`) falls below this percentage.  Default `0.2`, matching `TomographyModel.recon`; reference runs stay above this threshold through 10 iterations, so the validated configuration still runs all of them.  Set to `0` to guarantee exactly `max_iterations`. |
 | `init_dir` | `None` | Directory for caching the computed initialization image (`init_image.npy`).  On a subsequent run with the same settings, the cached image is loaded instead of recomputed. |
 | `log_dir` | `None` | Directory for `run_info.txt`, `timing_log.csv`, and `task_log.csv`.  `None` writes no log files. |
 
@@ -97,16 +96,18 @@ This gives both design goals at once:
   data and returns `(recon, recon_dict)` — exactly the contract of every other model.
 * **Simple 4D workflow.**  The user never handles parallel `sino_list`/`model_list`;
   the workflow is the same length as under Option A.
-* **Weights are visible and controllable again.**  Custom weights arrays are supported;
-  the `weight_type` registration question resolves itself (Section 4).
+* **Weights are visible and controllable again.**  Custom weights arrays are
+  supported, `weights=None` means unit weights exactly as in the base class, and the
+  `weight_type` parameter disappears from the model entirely (Section 4).
 * **Model reuse.**  Many scans of one protocol can be reconstructed with a single
   model instance (`for s in scans: mace.recon(s)`), keeping the per-frame models'
   compiled projectors and the thread-local denoiser caches warm — relevant for
   production pipelines.
-* **Memory lifetime.**  Weights are generated once on the full sinogram inside
-  `recon()` and sliced as views, instead of materializing ~`frame_overlap_factor` ×
-  the full sinogram in host RAM for the object's lifetime (and instead of computing
-  overlapping views' weights twice).
+* **Memory lifetime.**  Weights, when used, are one full-sinogram array supplied by
+  the caller and sliced per frame as views, instead of materializing
+  ~`frame_overlap_factor` × the full sinogram in host RAM for the object's lifetime
+  (and instead of computing overlapping views' weights twice).  With `weights=None`
+  nothing is stored at all.
 
 ### Workflow example
 
@@ -124,11 +125,14 @@ mace.set_params(mace_prior_weight=0.5, rho_mann=0.5)
 mace.configure_devices()          # optional; default uses all visible GPUs
 
 # Reconstruction: data enters here, like every other mbirjax model.
-recon_4d, recon_dict = mace.recon(sinogram, max_iterations=10,
+# transmission_root is the validated weighting for 4D data.
+weights = mj.gen_weights(sinogram, weight_type='transmission_root')
+recon_4d, recon_dict = mace.recon(sinogram, weights=weights, max_iterations=10,
                                   init_dir="./output/init", log_dir="./output/logs")
 
 # Same protocol, another scan: reuse the model, caches stay warm.
-recon_4d_b, _ = mace.recon(sinogram_b)
+weights_b = mj.gen_weights(sinogram_b, weight_type='transmission_root')
+recon_4d_b, _ = mace.recon(sinogram_b, weights=weights_b)
 ```
 
 Shape errors still surface early: `recon()` validates `sinogram.shape` against the
@@ -174,10 +178,10 @@ Constructor: takes `ct_model`, `frames_per_rotation`, `frame_overlap_factor`,
 models via `copy_ct_model` — no sinogram, no weights.
 
 `recon()`: takes `sinogram` (validated against the model's `sinogram_shape`) and the
-Category 4 arguments; slices sinogram and weights per frame as views; generates weights
-once on the full sinogram when `weights=None`; implements the outer
-`stop_threshold_change_pct` using the already-computed consensus change; assembles and
-returns `(recon_4d, recon_dict)`.
+Category 4 arguments; slices the sinogram — and the weights, when given — per frame as
+views, with `weights=None` forwarded to each frame's `prox_map` (unit weights, matching
+the base class); implements the outer `stop_threshold_change_pct` using the
+already-computed consensus change; assembles and returns `(recon_4d, recon_dict)`.
 
 Add `configure_devices(devices=None)` mirroring the `TomographyModel` semantics;
 remove `devices=` from `recon()` and absorb `_resolve_devices`.
@@ -203,15 +207,25 @@ Cleanups to make while moving the code:
   warning path, which is probably appropriate here but should be checked for an
   orchestrator that has no regularization of its own.
 
-### Step 3 — Add `construct_time_frame_models` to `mbirjax/utilities.py`
+### Step 3 — Add the frame utilities to `mbirjax/utilities.py`
 
-The public frame utility becomes model-only:
-`construct_time_frame_models(model, frames_per_rotation=6, frame_overlap_factor=2.0)`
-returns `(model_list, view_slices)`.  It replaces the old sinogram-splitting
-`construct_time_frames`; per-frame sinograms are obtained by slicing with the returned
-view slices.  The `MACE4DModel` constructor calls it, and it is exported from
-`mbirjax/__init__.py` alongside `copy_ct_model` and `gen_weights` for users who want to
-inspect the frame decomposition directly.
+Two public functions, exported alongside `copy_ct_model` and `gen_weights`, serving
+different users:
+
+* `construct_time_frame_models(model, frames_per_rotation=6, frame_overlap_factor=2.0)`
+  → `(model_list, view_slices)` — the model-only primitive.  Serves data-free uses:
+  the `MACE4DModel` constructor calls it, and simulation workflows (forward-projecting
+  a time-varying phantom frame by frame) need the per-frame models before any sinogram
+  exists.
+* `construct_time_frames(sinogram, model, frames_per_rotation=6, frame_overlap_factor=2.0)`
+  → `(sino_list, model_list)` — the original name and signature, restored as a
+  three-line wrapper over the primitive.  Serves the standalone per-frame workflow
+  (quick-look recons, debugging one frame) without constructing a `MACE4DModel`.  The
+  returned sinogram frames are NumPy views, so the wrapper costs nothing.
+
+Building the wrapper on the primitive keeps the two from drifting.  No `split_sinogram`
+method is added to `MACE4DModel`: model-bound inspection uses the stored attributes,
+`[sinogram[sl] for sl in mace.view_slices]`.
 
 ### Step 4 — Reconcile the GIF utilities
 
@@ -222,7 +236,7 @@ per-frame title.  These two features should be added to `save_volume_as_gif`, an
 
 ### Step 5 — Update `mbirjax/__init__.py`
 
-Export `MACE4DModel` and `construct_time_frame_models`.
+Export `MACE4DModel`, `construct_time_frames`, and `construct_time_frame_models`.
 
 ### Step 6 — Port the tests
 
@@ -232,9 +246,11 @@ pass `sinogram` to `recon()`, unpack `(recon, recon_dict)`, rename `init_image` 
 `init_recon`, and use `configure_devices` where the tests select devices.  Existing
 coverage (time-frame construction, dejitter correctness, task assignment, batched
 denoising, end-to-end serial reconstruction, init image cache) carries over; add
-coverage for the new behavior: explicit `weights` vs `weights=None` generation,
-the outer `stop_threshold_change_pct`, `num_frames` truncation, and
-`configure_devices` resolution (None / int / list).
+coverage for the new behavior: explicit `weights` (sliced per frame) vs `weights=None`
+(unit weights), the outer `stop_threshold_change_pct`, `num_frames` truncation,
+`configure_devices` resolution (None / int / list), and agreement between
+`construct_time_frame_models` view slices and the wrapper's sinogram frames.  The
+existing `construct_time_frames` tests carry over to the restored wrapper unchanged.
 
 ### Step 7 — Update docstrings and documentation ✓ (Google-style conversion done)
 
@@ -242,16 +258,20 @@ All docstrings in `mace4d.py` have been converted from NumPy style to Google sty
 (`Args:`, `Returns:`, `Raises:`, `Example:`), matching the convention used throughout
 mbirjax.  The interface changes above require a content pass at merge time (renamed and
 moved arguments, return tuple, `configure_devices`).  Remaining work: update
-`README.md`, `demo_4d.sh`, and `recon_4d.py` to the new interface.
+`README.md`, `demo_4d.sh`, and `recon_4d.py` to the new interface.  `recon_4d.py` gains
+a `--weight_type` flag defaulting to `transmission_root` and calls `gen_weights`
+explicitly before `recon()`, so the production workflow keeps the validated weighting
+with no extra user action.
 
 ---
 
 ## 4. Resolved Questions
 
-**`weight_type` registration** — resolved by the interface reversal.  `weight_type`
-stays a registered Category 2 parameter, but it now only governs the `weights=None`
-case of `recon()`; explicit weights arrays bypass it entirely.  The one deliberate
-deviation from the base class — `weights=None` meaning auto-generated
-`transmission_root` weights rather than unit weights — is a documentation decision,
-stated prominently in the `recon()` docstring, with unit weights available via
-`weight_type='unweighted'`.
+**`weight_type` registration** — resolved by removal.  `weights` follows the
+base-class contract exactly (`None` → unit weights), so the model registers no
+`weight_type` parameter at all and no deviation from `TomographyModel.recon` remains.
+The validated `transmission_root` weighting is applied explicitly by the caller with
+one `gen_weights` line; `recon_4d.py` does this via a `--weight_type` flag defaulting
+to `transmission_root`.  The `recon()` docstring and the demo state prominently that
+`transmission_root` is the validated setting for 4D data, so the unweighted default is
+not mistaken for the recommended configuration.
