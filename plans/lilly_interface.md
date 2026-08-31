@@ -87,7 +87,7 @@ Measured on the `Phantom_30s_Run1_Dec2024` dataset at full resolution
 
 Reducing `--downsample_row`/`--downsample_column` (i.e. increasing them
 above 1) or `--num_frames` shrinks both the reconstruction shape and the
-wall time roughly in proportion; see `plans/refactor_plan.md` for the
+wall time roughly in proportion; see `closed/refactor_plan.md` for the
 smaller "smoke" configuration (25 frames, 8x4 downsampling) used for fast
 iteration during development.
 

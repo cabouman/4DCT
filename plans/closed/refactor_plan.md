@@ -1,4 +1,4 @@
-# 4DCT Plan
+# 4DCT Plan: Complete 2026-08-24
 
 ## Current structure
 
@@ -17,7 +17,7 @@
 
 ## Next goal
 
-Merge `mace4d.py` into mbirjax as one functional block, then port to mbirtorch.
+Merge `../../mace4d.py` into mbirjax as one functional block, then port to mbirtorch.
 Open questions for that merge: module name and location inside mbirjax, whether
 `gen_gif_and_save` generalizes into a display utility (it must be useful beyond
 4D to qualify), and docstring-format alignment with mbirjax conventions.
