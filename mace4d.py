@@ -57,38 +57,29 @@ _DENOISE_COST_PER_PLANE = 0.015
 
 
 class MACE4DModel:
-    """
-    4D MACE CT reconstruction model.
+    """4D MACE CT reconstruction model.
 
-    Parameters
-    ----------
-    sino_list : list of ndarray
-        Per-time-frame sinograms, each shape (views_per_frame, det_rows, det_cols).
-    model_list : list of mbirjax.ConeBeamModel
-        Per-time-frame cone-beam models (one per frame, built via copy_ct_model).
-    mace_prior_weight : float or list of float
-        Weight given to prior agents.
-        Scalar w  → [1-w, w/3, w/3, w/3] across [forward, xyt, yzt, xzt].
-        3-list    → [1-sum, w0, w1, w2] (override each prior independently).
-    rho_mann : float
-        Mann iteration step size (ADMM rho). Default 0.5.
-    max_mace_itr : int
-        Number of outer MACE iterations. Default 10.
-    prox_num_iterations : int
-        Max prox_map iterations per MACE step. Default 3.
-    prox_stop_threshold : float
-        Convergence threshold passed to prox_map. Default 0.02.
-    weight_type : str
-        Sinogram weight type for mj.gen_weights. Default "transmission_root".
-    sigma_prox : float or None
-        Proximal map sigma. None lets mbirjax choose automatically.
-    dejitter : bool
-        Apply DCT-I temporal dejitter inside each agent. Default True.
-    frames_per_rotation : int
-        Time frames per full 360 degree rotation. This is also the period
-        of the jitter introduced by sinogram gating. Default 6.
-    verbose : int
-        0 = silent, 1 = normal progress, 2 = debug.
+    Args:
+        sino_list (list of ndarray): Per-time-frame sinograms, each shape
+            (views_per_frame, det_rows, det_cols).
+        model_list (list of mbirjax.ConeBeamModel): Per-time-frame cone-beam models,
+            one per frame, built via copy_ct_model.
+        mace_prior_weight (float or list of float): Weight given to prior agents.
+            Scalar w gives [1-w, w/3, w/3, w/3] across [forward, xyt, yzt, xzt].
+            A 3-list [w0, w1, w2] gives [1-sum, w0, w1, w2].
+        rho_mann (float): Mann iteration step size (ADMM rho). Default 0.5.
+        max_mace_itr (int): Number of outer MACE iterations. Default 10.
+        prox_num_iterations (int): Max prox_map iterations per MACE step. Default 3.
+        prox_stop_threshold (float): Convergence threshold passed to prox_map.
+            Default 0.02.
+        weight_type (str): Sinogram weight type for mj.gen_weights. Default
+            "transmission_root".
+        sigma_prox (float or None): Proximal map sigma. None lets mbirjax choose
+            automatically.
+        dejitter (bool): Apply DCT-I temporal dejitter inside each agent. Default True.
+        frames_per_rotation (int): Time frames per full 360 degree rotation. Also the
+            period of the jitter introduced by sinogram gating. Default 6.
+        verbose (int): 0 = silent, 1 = normal progress, 2 = debug.
     """
 
     def __init__(
@@ -143,34 +134,27 @@ class MACE4DModel:
         init_dir=None,
         log_dir=None,
     ):
-        """
-        Run 4D MACE reconstruction.
+        """Run 4D MACE reconstruction.
 
         Each iteration is a set of independent tasks — one prox_map per time
         frame and one batched denoise per prior orientation — executed by one
         worker thread per device with a fixed least-loaded task assignment.
 
-        Parameters
-        ----------
-        init_image : ndarray or None
-            Initial 4D image, shape (nt, nx, ny, nz). A wrong shape raises
-            ValueError. If None, the initial image comes from init_dir (see
-            below) or is recomputed.
-        devices : None, int, or list of jax devices
-            None → all visible GPUs (the CPU when there are none).
-            int n → the first n visible devices.  One device runs the tasks
-            inline with no threads (the serial path).
-        init_dir : str or None
-            Cache directory for the computed initial image (init_image.npy).
-            If it holds an image of the correct shape, that image is used;
-            otherwise the initialization is recomputed and saved there.
-        log_dir : str or None
-            Directory for log files (run_info.txt, timing_log.csv,
-            task_log.csv). Created if needed. None writes no log files.
+        Args:
+            init_image (ndarray or None): Initial 4D image, shape (nt, nx, ny, nz).
+                A wrong shape raises ValueError. If None, the initial image comes
+                from init_dir or is recomputed.
+            devices (None, int, or list of jax.Device): None selects all visible GPUs
+                (the CPU when there are none). int n selects the first n visible
+                devices. One device runs tasks inline with no threads (the serial path).
+            init_dir (str or None): Cache directory for the computed initial image
+                (init_image.npy). If it holds an image of the correct shape that image
+                is used; otherwise the initialization is recomputed and saved there.
+            log_dir (str or None): Directory for log files (run_info.txt,
+                timing_log.csv, task_log.csv). Created if needed. None writes no logs.
 
-        Returns
-        -------
-        recon_4d : ndarray, shape (nt, nx, ny, nz)
+        Returns:
+            ndarray: 4D reconstruction, shape (nt, nx, ny, nz).
         """
         nt = self.nt
         beta = self.beta
@@ -554,10 +538,10 @@ def _assign_tasks(num_frames, plane_counts, num_devices):
     are placed first, largest first; then each unit-cost prox task goes to the
     least-loaded device.
 
-    Returns
-    -------
-    frame_device : list of int, device index for each frame's prox task
-    orient_device : list of int, device index for each orientation's denoise
+    Returns:
+        tuple: (frame_device, orient_device) where frame_device is a list of int
+            device indices for each frame's prox task, and orient_device is a list
+            of int device indices for each orientation's denoise.
     """
     loads = [0.0] * num_devices
     orient_device = [0] * len(plane_counts)
@@ -595,31 +579,24 @@ def _silence_model_logging(model, name):
 # ---------------------------------------------------------------------------
 
 def construct_time_frames(sino, model, frames_per_rotation=6, frame_overlap_factor=2.0):
-    """
-    Split a full sinogram into overlapping fixed-size time frames.
+    """Split a full sinogram into overlapping fixed-size time frames.
 
     The number of views per frame and the stride between frames are derived
     from the model's angle spacing, so they stay correct under view subsampling.
 
-    Parameters
-    ----------
-    sino : ndarray, shape (num_views, det_rows, det_cols)
-    model : mbirjax.ConeBeamModel
-        Fully-built model for the full scan.
-    frames_per_rotation : int
-        Number of time frames per full 360 degree rotation. Default 6
-        (one frame every 60 degrees).
-    frame_overlap_factor : float
-        Number of frames that share any given view. Each frame spans
-        frame_overlap_factor * (360 / frames_per_rotation) degrees.
-        Default 2.0 (each frame spans 120 degrees).
+    Args:
+        sino (ndarray): Full sinogram, shape (num_views, det_rows, det_cols).
+        model (mbirjax.ConeBeamModel): Fully-built model for the full scan.
+        frames_per_rotation (int): Number of time frames per full 360 degree rotation.
+            Default 6 (one frame every 60 degrees).
+        frame_overlap_factor (float): Number of frames that share any given view. Each
+            frame spans frame_overlap_factor * (360 / frames_per_rotation) degrees.
+            Default 2.0 (each frame spans 120 degrees).
 
-    Returns
-    -------
-    sino_frames : list of ndarray
-        Trailing views that cannot form a full frame are discarded.
-    model_frames : list of mbirjax.ConeBeamModel
-        Per-frame models built via mj.copy_ct_model.
+    Returns:
+        tuple: (sino_frames, model_frames) where sino_frames is a list of ndarray
+            (trailing views that cannot form a full frame are discarded) and
+            model_frames is a list of mbirjax.ConeBeamModel built via copy_ct_model.
     """
     # Internal angular quantities in radians.
     angle_stride = 2.0 * np.pi / frames_per_rotation
@@ -665,32 +642,24 @@ def _dejitter_4d_dct(
     chunk_size=None,
     verbose=True,
 ):
-    """
-    Remove periodic temporal jitter from a 4D reconstruction via DCT-I filtering.
+    """Remove periodic temporal jitter from a 4D reconstruction via DCT-I filtering.
 
-    Parameters
-    ----------
-    recon_4d : ndarray, shape (time, x, y, z)
-    period : float or int
-        Main jitter period in frames (e.g. 6 for a 6-phase gating protocol).
-    harmonics : bool or list of int
-        True  → remove main period and all harmonics with period/h >= 2.
-        False → remove only the main period.
-        list  → explicit list of harmonic indices h to remove.
-    band_width : int
-        Number of DCT-I modes to zero on each side of the target mode.
-        band_width=1 zeroes [k_center-1, k_center, k_center+1].
-    dtype : np.dtype
-        Working dtype (float32 reduces memory).
-    chunk_size : int or None
-        Process the last spatial axis in chunks of this size to reduce peak
-        memory. None processes the whole axis in one pass.
-    verbose : bool
-        Print the modes being zeroed.
+    Args:
+        recon_4d (ndarray): 4D volume, shape (time, x, y, z).
+        period (float or int): Main jitter period in frames (e.g. 6 for a 6-phase
+            gating protocol).
+        harmonics (bool or list of int): True removes the main period and all harmonics
+            with period/h >= 2. False removes only the main period. A list specifies
+            explicit harmonic indices h to remove.
+        band_width (int): Number of DCT-I modes to zero on each side of the target
+            mode. band_width=1 zeroes [k_center-1, k_center, k_center+1].
+        dtype (np.dtype): Working dtype (float32 reduces memory).
+        chunk_size (int or None): Process the last spatial axis in chunks of this size
+            to reduce peak memory. None processes the whole axis in one pass.
+        verbose (bool): Print the modes being zeroed.
 
-    Returns
-    -------
-    recon_dejittered : ndarray, same shape as recon_4d
+    Returns:
+        ndarray: Dejittered volume, same shape as recon_4d.
     """
     recon_4d = np.asarray(recon_4d)
     N = recon_4d.shape[0]
@@ -881,23 +850,21 @@ def _auto_batch_size(vol_shape, device):
 
 
 def _batched_hyperplane_denoise(x, denoiser, device):
-    """
-    Denoise a stack of same-shaped 3D volumes with shared, preconfigured settings.
+    """Denoise a stack of same-shaped 3D volumes with shared, preconfigured settings.
 
     One jax.vmap call runs the denoiser's single-device jitted sweep over a
-    whole batch, so the GPU is filled instead of processing volumes one at a
-    time (plan: Optimization Step 1). The volumes are independent, so the
-    result equals per-volume denoising with the same constants.
+    whole batch, so the GPU is filled instead of processing volumes one at a time.
+    The volumes are independent, so the result equals per-volume denoising with
+    the same constants.
 
-    Parameters
-    ----------
-    x : ndarray, shape (num_volumes, d0, d1, d2)
-    denoiser : QGGMRFDenoiser for shape (d0, d1, d2), after _configure_denoiser.
-    device : jax device
+    Args:
+        x (ndarray): Stack of volumes, shape (num_volumes, d0, d1, d2).
+        denoiser (QGGMRFDenoiser): Configured for shape (d0, d1, d2) via
+            _configure_denoiser.
+        device (jax.Device): Device on which denoising runs.
 
-    Returns
-    -------
-    y : ndarray, same shape as x
+    Returns:
+        ndarray: Denoised stack, same shape as x.
     """
     num_vols, vol_shape = x.shape[0], x.shape[1:]
     partition, fm_constant, qggmrf_params, image_shape = _denoise_constants(denoiser)
@@ -944,27 +911,20 @@ def _batched_hyperplane_denoise(x, denoiser, device):
 
 
 def _denoiser_wrapper(x, permute_vector, sigma, device, config_token=None):
-    """
-    Permute a 4D volume so the hyperplane axis is first, batch-denoise the
+    """Permute a 4D volume so the hyperplane axis is first, batch-denoise the
     resulting stack of 3D volumes at the shared global sigma, then unpermute.
 
-    Parameters
-    ----------
-    x : ndarray, shape (nt, nx, ny, nz)
-    permute_vector : tuple of int
-        Permutation that puts the hyperplane axis first.
-    sigma : float
-        Global noise sigma shared by every volume.
-    device : jax device
-        Device on which denoising runs.
-    config_token : hashable or None
-        Configure the denoiser (sigma, regularization constants, partition)
-        only when this token changes — once per recon. None reconfigures on
-        every call.
+    Args:
+        x (ndarray): 4D volume, shape (nt, nx, ny, nz).
+        permute_vector (tuple of int): Permutation that puts the hyperplane axis first.
+        sigma (float): Global noise sigma shared by every volume.
+        device (jax.Device): Device on which denoising runs.
+        config_token (hashable or None): Configure the denoiser (sigma, regularization
+            constants, partition) only when this token changes — once per recon. None
+            reconfigures on every call.
 
-    Returns
-    -------
-    y : ndarray, same shape as x
+    Returns:
+        ndarray: Denoised volume, same shape as x.
     """
     x_perm = np.ascontiguousarray(np.transpose(x, permute_vector))
     denoiser = _get_qggmrf_denoiser(x_perm.shape[1:], device)
@@ -983,21 +943,16 @@ def _denoiser_wrapper(x, permute_vector, sigma, device, config_token=None):
 # ---------------------------------------------------------------------------
 
 def gen_gif_and_save(recon, gif_path, vmin=0, vmax=0.06, x_slice=None, duration=0.15):
-    """
-    Generate a GIF of one x slice (YZ plane) of a 4D reconstruction stepping
-    through time frames. The x slice shows the motion clearly.
+    """Generate a GIF of one x slice (YZ plane) of a 4D reconstruction stepping
+    through time frames.
 
-    Parameters
-    ----------
-    recon : ndarray, shape (nt, nx, ny, nz)
-    gif_path : str
-        Output path for the saved GIF.
-    vmin, vmax : float
-        Colormap range for imshow.
-    x_slice : int or None
-        X index to display. Defaults to the middle slice.
-    duration : float
-        Duration per frame in seconds.
+    Args:
+        recon (ndarray): 4D reconstruction, shape (nt, nx, ny, nz).
+        gif_path (str): Output path for the saved GIF.
+        vmin (float): Lower colormap bound for imshow.
+        vmax (float): Upper colormap bound for imshow.
+        x_slice (int or None): X index to display. Defaults to the middle slice.
+        duration (float): Duration per frame in seconds.
     """
     # Imported here so the compute path does not require visualization packages.
     import imageio.v2 as imageio
