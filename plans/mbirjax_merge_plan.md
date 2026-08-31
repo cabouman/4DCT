@@ -194,11 +194,12 @@ call to pass `sino_list` as the first positional argument.  The existing test co
 is otherwise unchanged: it covers time-frame construction, dejitter correctness, task
 assignment, batched denoising, end-to-end serial reconstruction, and the init image cache.
 
-### Step 7 — Update docstrings and documentation
+### Step 7 — Update docstrings and documentation ✓ (docstrings done)
 
-Convert all docstrings from NumPy style to Google style (`Args:`, `Returns:`, `Raises:`,
-`Example:`), which is the convention used throughout mbirjax.  Update `README.md`,
-`demo_4d.sh`, and `recon_4d.py` to reflect the new interface.
+All docstrings in `mace4d.py` have been converted from NumPy style to Google style
+(`Args:`, `Returns:`, `Raises:`, `Example:`), matching the convention used throughout
+mbirjax.  Remaining work at merge time: update `README.md`, `demo_4d.sh`, and
+`recon_4d.py` to reflect the new interface.
 
 ---
 
