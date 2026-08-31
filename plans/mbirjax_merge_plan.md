@@ -26,7 +26,7 @@ construction.  Weights are computed at the start of `recon()` instead of in `__i
 | `max_mace_itr` | `10` | Number of outer MACE iterations. |
 | `prox_num_iterations` | `3` | Maximum number of `prox_map` iterations per MACE step. |
 | `prox_stop_threshold` | `0.02` | `prox_map` convergence threshold, expressed as percent change. |
-| `sigma_p` | `None` | Proximal sigma.  `None` lets mbirjax select a value automatically. |
+| `sigma_prox` | `None` | Proximal sigma.  `None` lets mbirjax select a value automatically. |
 | `dejitter` | `True` | Apply DCT-I temporal dejitter inside each agent. |
 | `frames_per_rotation` | `6` | Number of time frames per full rotation.  This value sets the period of the temporal dejitter filter. |
 | `weight_type` | `"transmission_root"` | Sinogram weight type passed to `gen_weights`. |
@@ -204,11 +204,7 @@ Convert all docstrings from NumPy style to Google style (`Args:`, `Returns:`, `R
 
 ## 5. Open Questions
 
-Three questions remain unresolved before the merge can be finalized.
-
-**`sigma_p` vs `sigma_prox`.**  mbirjax already registers `sigma_prox` as a parameter
-name.  One option is to map `sigma_p` to `sigma_prox` inside `set_params`; another is
-to rename the CLI flag in `recon_4d.py` to `--sigma_prox`.
+Two questions remain unresolved before the merge can be finalized.
 
 **`weight_type` registration.**  This parameter is not currently registered in
 mbirjax's parameter system.  It can be added to the registry, or kept as a plain
