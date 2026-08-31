@@ -69,7 +69,7 @@ def parse_args():
     g.add_argument("--rho_mann", type=float, default=0.5, help="Mann iteration step size (ADMM rho).")
     g.add_argument("--prox_num_iterations", type=int, default=3, help="Max prox_map iterations per MACE step.")
     g.add_argument("--prox_stop_threshold", type=float, default=0.02, help="Prox_map convergence threshold.")
-    g.add_argument("--sigma_p", type=float, default=None, help="Proximal map sigma. Omit for automatic selection.")
+    g.add_argument("--sigma_prox", type=float, default=None, help="Proximal map sigma. Omit for automatic selection.")
     g.add_argument("--no_dejitter", action="store_true", help="Disable the DCT-I temporal dejitter.")
 
     g = parser.add_argument_group("execution")
@@ -147,7 +147,7 @@ def main():
         max_mace_itr=args.max_mace_itr,
         prox_num_iterations=args.prox_num_iterations,
         prox_stop_threshold=args.prox_stop_threshold,
-        sigma_p=args.sigma_p,
+        sigma_prox=args.sigma_prox,
         dejitter=not args.no_dejitter,
         frames_per_rotation=args.frames_per_rotation,
         verbose=args.verbose,

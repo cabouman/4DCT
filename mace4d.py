@@ -80,7 +80,7 @@ class MACE4DModel:
         Convergence threshold passed to prox_map. Default 0.02.
     weight_type : str
         Sinogram weight type for mj.gen_weights. Default "transmission_root".
-    sigma_p : float or None
+    sigma_prox : float or None
         Proximal map sigma. None lets mbirjax choose automatically.
     dejitter : bool
         Apply DCT-I temporal dejitter inside each agent. Default True.
@@ -101,7 +101,7 @@ class MACE4DModel:
         prox_num_iterations=3,
         prox_stop_threshold=0.02,
         weight_type="transmission_root",
-        sigma_p=None,
+        sigma_prox=None,
         dejitter=True,
         frames_per_rotation=6,
         verbose=1,
@@ -116,7 +116,7 @@ class MACE4DModel:
         self.max_mace_itr = max_mace_itr
         self.prox_num_iterations = prox_num_iterations
         self.prox_stop_threshold = prox_stop_threshold
-        self.sigma_p = sigma_p
+        self.sigma_prox = sigma_prox
         self.verbose = verbose
         self.dejitter = dejitter
         self.frames_per_rotation = frames_per_rotation
@@ -384,7 +384,7 @@ class MACE4DModel:
             self.model_list[t].prox_map(
                 prox_input=jax.device_put(W0_t, device),
                 sinogram=self._sino_dev[t],
-                sigma_prox=self.sigma_p,
+                sigma_prox=self.sigma_prox,
                 weights=self._weights_dev[t],
                 init_recon=jax.device_put(X0_t, device),
                 max_iterations=self.prox_num_iterations,
@@ -455,7 +455,7 @@ class MACE4DModel:
             f"max_mace_itr         = {self.max_mace_itr}",
             f"prox_num_iterations  = {self.prox_num_iterations}",
             f"prox_stop_threshold  = {self.prox_stop_threshold}",
-            f"sigma_p              = {'auto' if self.sigma_p is None else self.sigma_p}",
+            f"sigma_prox           = {'auto' if self.sigma_prox is None else self.sigma_prox}",
             f"denoiser sigma (global) = {global_sigma:.6g}",
             f"dejitter             = {self.dejitter}, frames_per_rotation {self.frames_per_rotation}",
         ]
