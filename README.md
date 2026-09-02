@@ -90,7 +90,7 @@ whole run. The per-frame initialization uses the same workers and map.
 
 **GPU pinning**: every `ConeBeamModel` and `QGGMRFDenoiser` is pinned to exactly one GPU via `configure_devices([device])`, and each frame's sinogram and weights live on that GPU for the whole run. Pinning prevents the NCCL clique deadlock that occurs when mbirjax's auto-sharding builds a multi-GPU Mesh inside concurrent threads.
 
-Devices are selected with `mace_model.configure_devices(...)`: `None` (or never calling it)
+Devices are selected with `mace_model.set_device_pool(...)`: `None` (or never calling it)
 uses all visible GPUs, `1` forces the serial path, and an explicit list pins exactly those
 devices. One device runs the same tasks inline with no threads.
 
