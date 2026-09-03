@@ -151,7 +151,7 @@ def main():
     )
     if args.serial:
         mace_model.set_device_pool(1)
-    print(f"Time frames: {mace_model.nt} "
+    print(f"Time frames: {mace_model.num_frames} "
           f"({mace_model.view_slices[0].stop - mace_model.view_slices[0].start} views each)")
 
     # transmission_root is the validated weighting for 4D data; the model itself defaults to
@@ -179,7 +179,7 @@ def main():
     print(f"[INFO] Recon saved to: {out_path}")
     print(f"[INFO] Logs:           {os.path.abspath(log_dir)}")
 
-    append_run_info(log_dir, args, dataset_dir, mace_model.nt, run_time_h, out_path)
+    append_run_info(log_dir, args, dataset_dir, mace_model.num_frames, run_time_h, out_path)
 
     # The middle x slice (the YZ plane through the center) stepping through time.
     gif_path = os.path.join(output_path, "recon_4d.gif")

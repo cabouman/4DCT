@@ -25,7 +25,7 @@ bash demo_4d.sh
 ```
 
 Output is written to `./output/`:
-- `recon_4d_<time>h.npy` — reconstructed 4D volume, shape `(nt, nx, ny, nz)`
+- `recon_4d_<time>h.npy` — reconstructed 4D volume, shape `(num_frames, nx, ny, nz)`
 - `init/init_recon.npy` — per-frame MBIR initialization (saved for potential reuse)
 - `logs/run_info.txt` — human-readable summary of all run settings
 - `logs/timing_log.csv` — per-iteration agent timing and consensus change
